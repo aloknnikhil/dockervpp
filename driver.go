@@ -1,4 +1,4 @@
-package vpp
+package dockervpp
 
 import (
 	"encoding/json"
