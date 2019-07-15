@@ -1,7 +1,6 @@
 package dockervpp
 
 import (
-	"encoding/json"
 	"log"
 	"net"
 	"os/user"
@@ -13,14 +12,11 @@ import (
 
 	"git.fd.io/govpp.git/api"
 
-	"github.com/docker/libkv"
-
 	"github.com/FDio/govpp"
 
 	"git.fd.io/govpp.git/core"
 	"github.com/docker/docker/pkg/plugins"
-	"github.com/docker/go-plugins-helpers/network"
-	"github.com/docker/libkv/store"
+	pluginapi "github.com/docker/go-plugins-helpers/network"
 	"github.com/docker/libkv/store/boltdb"
 	"github.com/docker/libnetwork/netlabel"
 	"github.com/pkg/errors"
@@ -36,15 +32,43 @@ const (
 // Client to interact with VPP
 var Client driver
 
+type device struct {
+	netlink.Link
+	state     netlink.LinkOperState
+	id        string
+	networkID string
+}
+
+type network struct {
+	id          string
+	options     map[string]interface{}
+	ipV4Gateway net.IP
+	ipV4Subnet  *net.IPNet
+	ipV6Gateway net.IP
+	ipV6Subnet  *net.IPNet
+	endpoints   []*device
+}
+
 type driver struct {
+	// Synchronization primitives
 	sync.Once
 	sync.WaitGroup
-	network string
-	vppcnx  *core.Connection
-	vppapi  api.Channel
-	docker  *plugins.Client
-	nlink   *netlink.Handle
-	store   store.Store
+
+	// VPP client connection
+	vppcnx *core.Connection
+	vppapi api.Channel
+
+	// Docker API client
+	docker *plugins.Client
+
+	// Linux Netlink client
+	nlink *netlink.Handle
+
+	// Cache
+	// Network ID -> dockervpp.network
+	networks map[string]*network
+	// Endpoint ID -> dockervpp.device
+	endpoints map[string]*device
 }
 
 func init() {
@@ -60,20 +84,9 @@ func (d *driver) Close() (err error) {
 
 func (d *driver) Run(username string) (err error) {
 	d.Do(func() {
-		// Init store
-		if d.store, err = libkv.NewStore(
-			store.BOLTDB,
-			[]string{
-				KVStorePath,
-			},
-			// TODO: Shard data that is not dependent
-			&store.Config{
-				Bucket: "config",
-			},
-		); err != nil {
-			err = errors.Wrap(err, "libkv.NewStore")
-			return
-		}
+
+		d.networks = make(map[string]*network)
+		d.endpoints = make(map[string]*device)
 
 		// Connect to VPP
 		if d.vppcnx, err = govpp.Connect(VPPAPISock); err != nil {
@@ -105,8 +118,8 @@ func (d *driver) Run(username string) (err error) {
 		d.Add(1)
 		defer d.Done()
 
-		if err = network.NewHandler(d).ServeUnix("vpp", gid); err != nil {
-			err = errors.Wrap(err, "network.NewHandler().ServeUnix")
+		if err = pluginapi.NewHandler(d).ServeUnix("vpp", gid); err != nil {
+			err = errors.Wrap(err, "pluginapi.NewHandler().ServeUnix")
 			return
 		}
 	})
@@ -115,21 +128,34 @@ func (d *driver) Run(username string) (err error) {
 }
 
 func (d *driver) AllocateNetwork(
-	request *network.AllocateNetworkRequest,
-) (response *network.AllocateNetworkResponse, err error) {
+	request *pluginapi.AllocateNetworkRequest,
+) (response *pluginapi.AllocateNetworkResponse, err error) {
 	log.Println("AllocateNetwork")
 	//err = &driverapi.ErrNotImplemented{}
 	return
 }
 
 func (d *driver) CreateEndpoint(
-	request *network.CreateEndpointRequest,
-) (response *network.CreateEndpointResponse, err error) {
+	request *pluginapi.CreateEndpointRequest,
+) (response *pluginapi.CreateEndpointResponse, err error) {
 	log.Printf("CreateEndpoint - %+v\n", request)
 
 	if request.Interface == nil {
 		err = errors.Wrap(err, "Invalid interface specified")
 		return
+	}
+
+	// Check if network is cached (and thus created)
+	var network *network
+	var ok bool
+	if network, ok = d.networks[request.NetworkID]; !ok {
+		err = errors.Errorf("Network - %s doesn't exist", request.NetworkID)
+		return
+	}
+
+	device := &device{
+		id:        request.EndpointID,
+		networkID: request.NetworkID,
 	}
 
 	// Create VETH pair for end-point
@@ -150,7 +176,7 @@ func (d *driver) CreateEndpoint(
 		return
 	}
 
-	response = &network.CreateEndpointResponse{}
+	response = &pluginapi.CreateEndpointResponse{}
 
 	if len(request.Interface.MacAddress) != 0 {
 		var mac net.HardwareAddr
@@ -165,7 +191,7 @@ func (d *driver) CreateEndpoint(
 			return
 		}
 	} else {
-		response.Interface = &network.EndpointInterface{
+		response.Interface = &pluginapi.EndpointInterface{
 			MacAddress: peer.Attrs().HardwareAddr.String(),
 		}
 	}
@@ -194,14 +220,18 @@ func (d *driver) CreateEndpoint(
 		}
 	}
 
-	log.Printf("Created Endpoint - %+v\n", peer)
+	// Cache VETH
+	device.Link = vETH
 
-	//err = &driverapi.ErrNotImplemented{}
+	// Add endpoint to network cache
+	network.endpoints = append(network.endpoints, device)
+	d.endpoints[request.EndpointID] = device
+	log.Printf("Created Endpoint - %+v\n", peer)
 	return
 }
 
 func (d *driver) CreateNetwork(
-	request *network.CreateNetworkRequest,
+	request *pluginapi.CreateNetworkRequest,
 ) (err error) {
 	log.Printf("CreateNetwork - %+v\n", request)
 
@@ -213,40 +243,46 @@ func (d *driver) CreateNetwork(
 		return
 	}
 
-	// Check if IPv6 network
-	isIPV6 := false
-	if val, ok := request.Options[netlabel.Prefix+netlabel.EnableIPv6]; ok {
-		if isIPV6, ok = val.(bool); !ok {
-			err = errors.Errorf("CreateNetwork: Invalid value for %s", netlabel.Prefix+netlabel.EnableIPv6)
-			log.Println(err.Error())
-			return
-		}
+	// Container for caching
+	network := &network{
+		id:      request.NetworkID,
+		options: request.Options,
 	}
 
-	// If IPv6, verify there's atleast 1 subnet specified
-	var ip6gateway net.IP
-	var ip6pool *net.IPNet
-	if isIPV6 {
-		if len(request.IPv6Data) == 0 {
-			err = errors.New("CreateNetwork: IPv6 requested but no subnet specified")
-			log.Println(err.Error())
-			return
-		}
-		if ip6gateway, _, err = net.ParseCIDR(request.IPv6Data[0].Gateway); err != nil {
-			err = errors.Errorf("CreateNetwork: Could not parse IPv6 Gateway: %s", err.Error())
-			log.Println(err.Error())
-			return
-		}
-		if _, ip6pool, err = net.ParseCIDR(request.IPv6Data[0].Pool); err != nil {
-			err = errors.Errorf("CreateNetwork: Could not parse IPv6 Pool: %s", err.Error())
-			log.Println(err.Error())
-			return
+	// Parse options
+	isIPV6 := false
+	for option, value := range request.Options {
+		switch option {
+		case netlabel.Prefix + netlabel.EnableIPv6:
+			ok := false
+			if isIPV6, ok = value.(bool); !ok {
+				err = errors.Errorf("CreateNetwork: Invalid value for %s", netlabel.Prefix+netlabel.EnableIPv6)
+				log.Println(err.Error())
+				return
+			}
+
+			// If IPv6, verify there's atleast 1 subnet specified
+			if isIPV6 {
+				if len(request.IPv6Data) == 0 {
+					err = errors.New("CreateNetwork: IPv6 requested but no subnet specified")
+					log.Println(err.Error())
+					return
+				}
+				if network.ipV6Gateway, _, err = net.ParseCIDR(request.IPv6Data[0].Gateway); err != nil {
+					err = errors.Errorf("CreateNetwork: Could not parse IPv6 Gateway: %s", err.Error())
+					log.Println(err.Error())
+					return
+				}
+				if _, network.ipV6Subnet, err = net.ParseCIDR(request.IPv6Data[0].Pool); err != nil {
+					err = errors.Errorf("CreateNetwork: Could not parse IPv6 Pool: %s", err.Error())
+					log.Println(err.Error())
+					return
+				}
+			}
 		}
 	}
 
 	// If IPv4, verify there's atleast 1 subnet specified
-	var ip4gateway net.IP
-	var ip4pool *net.IPNet
 	if len(request.IPv4Data) == 0 {
 		if !isIPV6 {
 			err = errors.New("No IPv4/6 subnets specified")
@@ -254,103 +290,104 @@ func (d *driver) CreateNetwork(
 			return
 		}
 	} else {
-		if ip4gateway, _, err = net.ParseCIDR(request.IPv4Data[0].Gateway); err != nil {
+		if network.ipV4Gateway, _, err = net.ParseCIDR(request.IPv4Data[0].Gateway); err != nil {
 			err = errors.Errorf("CreateNetwork: Could not parse IPv4 Gateway: %s", err.Error())
 			log.Println(err.Error())
 			return
 		}
-		if _, ip4pool, err = net.ParseCIDR(request.IPv4Data[0].Pool); err != nil {
+		if _, network.ipV4Subnet, err = net.ParseCIDR(request.IPv4Data[0].Pool); err != nil {
 			err = errors.Errorf("CreateNetwork: Could not parse IPv4 Pool: %s", err.Error())
 			log.Println(err.Error())
 			return
 		}
 	}
 
-	// Marshall & store
-	// TODO: Delete if VPP's state is dependent on the driver's state
-	var value json.RawMessage
-	if value, err = json.Marshal(request); err != nil {
-		err = errors.Wrap(err, "json.Marshal()")
-		return
-	}
+	// Cache network
+	d.networks[request.NetworkID] = network
 
-	success := false
-	if success, _, err = d.store.AtomicPut(networkID, value, nil, nil); err != nil {
-		err = errors.Wrap(err, "store.AtomicPut()")
-		return
-	}
-
-	if !success {
-		err = errors.Errorf("Could not create new network in store %s", networkID)
-		return
-	}
-
-	log.Printf("Stored network configuration - ID:%s; IPv4 Gateway: %+v; IPv4 Pool: %+v; IPv6 Gateway: %+v, IPv6 Pool: %+v", networkID, ip4gateway, ip4pool, ip6gateway, ip6pool)
+	log.Printf(
+		"Stored network configuration - ID:%s; IPv4 Gateway: %+v; IPv4 Pool: %+v; IPv6 Gateway: %+v, IPv6 Pool: %+v",
+		networkID, network.ipV4Gateway, network.ipV4Subnet, network.ipV6Gateway, network.ipV6Subnet,
+	)
 	return
 }
 
 func (d *driver) DeleteEndpoint(
-	request *network.DeleteEndpointRequest,
+	request *pluginapi.DeleteEndpointRequest,
 ) (err error) {
 	log.Println("DeleteEndpoint")
 
-	vETH := &netlink.Veth{
-		LinkAttrs: netlink.LinkAttrs{Name: "VPP" + request.NetworkID[:4]},
-		PeerName:  "VETH" + request.NetworkID[:4],
-	}
-
-	var peer netlink.Link
-	if peer, err = d.nlink.LinkByName(vETH.PeerName); err != nil {
-		err = errors.Wrap(err, "netlink.LinkByName()")
+	// Check if the endpoint exists
+	var endpoint *device
+	var ok bool
+	if endpoint, ok = d.endpoints[request.EndpointID]; !ok {
+		err = errors.Errorf("Endpoint - %s doesn't exist", request.EndpointID)
 		return
 	}
 
-	if err = d.nlink.LinkDel(peer); err != nil {
-		err = errors.Wrapf(err, "netlink.LinkDel(%+v)", peer)
+	// Cleanup based on the link type
+	switch link := endpoint.Link.(type) {
+	case *netlink.Veth:
+		var peer netlink.Link
+		if peer, err = d.nlink.LinkByName(link.PeerName); err != nil {
+			err = errors.Wrap(err, "netlink.LinkByName()")
+			return
+		}
+
+		if err = d.nlink.LinkDel(peer); err != nil {
+			err = errors.Wrapf(err, "netlink.LinkDel(%+v)", peer)
+			return
+		}
+	default:
+		err = errors.Errorf("Endpoint - %s unknown type", request.EndpointID)
 		return
 	}
 
-	log.Printf("Endpoint - %+v deleted\n", peer)
+	// Delete from cache
+	delete(d.endpoints, request.EndpointID)
+
+	// Set link state to reflect state in other caches
+	endpoint.state = netlink.OperNotPresent
+
+	log.Printf("Endpoint - %+v deleted\n", request.EndpointID)
 	return
 }
 
 func (d *driver) DeleteNetwork(
-	request *network.DeleteNetworkRequest,
+	request *pluginapi.DeleteNetworkRequest,
 ) (err error) {
 	log.Println("DeleteNetwork")
-	networkID := request.NetworkID
 
 	// Check if the network exists
-	var kv *store.KVPair
-	if kv, err = d.store.Get(networkID); err != nil {
-		if err == store.ErrKeyNotFound {
-			err = errors.Errorf("Network w/ ID: %s not found", networkID)
-			log.Println(err.Error())
-			return
-		}
-		err = errors.Wrap(err, "d.store.Get()")
-		log.Println(err.Error())
-		return
-	}
-
-	// TODO: Validate
+	var network *network
 	var ok bool
-	if ok, err = d.store.AtomicDelete(networkID, kv); err != nil {
-		err = errors.Wrap(err, "d.store.AtomicDelete()")
-		log.Println(err.Error())
+	if network, ok = d.networks[request.NetworkID]; !ok {
+		err = errors.Errorf("Network - %s doesn't exist", request.NetworkID)
 		return
 	}
 
-	if !ok {
-		err = errors.Errorf("Failed to delete network %s. Try again later", networkID)
-		log.Println(err.Error())
-		return
+	// Delete each endpoint, if any
+	for _, endpoint := range network.endpoints {
+		if endpoint.state != netlink.OperNotPresent {
+			deletereq := &pluginapi.DeleteEndpointRequest{
+				NetworkID:  request.NetworkID,
+				EndpointID: endpoint.id,
+			}
+			if err = d.DeleteEndpoint(deletereq); err != nil {
+				err = errors.Wrap(err, "d.DeleteEndpoint()")
+				return
+			}
+		}
 	}
+
+	// Delete from cache
+	delete(d.networks, request.NetworkID)
+
 	return
 }
 
 func (d *driver) DiscoverDelete(
-	notification *network.DiscoveryNotification,
+	notification *pluginapi.DiscoveryNotification,
 ) (err error) {
 	log.Println("DiscoverDelete")
 	//err = &driverapi.ErrNotImplemented{}
@@ -358,7 +395,7 @@ func (d *driver) DiscoverDelete(
 }
 
 func (d *driver) DiscoverNew(
-	notification *network.DiscoveryNotification,
+	notification *pluginapi.DiscoveryNotification,
 ) (err error) {
 	log.Println("DiscoverNew")
 	//err = &driverapi.ErrNotImplemented{}
@@ -366,15 +403,15 @@ func (d *driver) DiscoverNew(
 }
 
 func (d *driver) EndpointInfo(
-	request *network.InfoRequest,
-) (response *network.InfoResponse, err error) {
+	request *pluginapi.InfoRequest,
+) (response *pluginapi.InfoResponse, err error) {
 	log.Println("EndpointInfo")
 	//err = &driverapi.ErrNotImplemented{}
 	return
 }
 
 func (d *driver) FreeNetwork(
-	request *network.FreeNetworkRequest,
+	request *pluginapi.FreeNetworkRequest,
 ) (err error) {
 	log.Println("EndpointInfo")
 	//err = &driverapi.ErrNotImplemented{}
@@ -382,16 +419,16 @@ func (d *driver) FreeNetwork(
 }
 
 func (d *driver) GetCapabilities() (
-	response *network.CapabilitiesResponse, err error,
+	response *pluginapi.CapabilitiesResponse, err error,
 ) {
 	log.Println("GetCapabilities")
-	response = &network.CapabilitiesResponse{Scope: network.LocalScope, ConnectivityScope: network.GlobalScope}
+	response = &pluginapi.CapabilitiesResponse{Scope: pluginapi.LocalScope, ConnectivityScope: pluginapi.GlobalScope}
 	return
 }
 
 func (d *driver) Join(
-	request *network.JoinRequest,
-) (response *network.JoinResponse, err error) {
+	request *pluginapi.JoinRequest,
+) (response *pluginapi.JoinResponse, err error) {
 	log.Println("Join")
 
 	vETH := &netlink.Veth{
@@ -399,8 +436,8 @@ func (d *driver) Join(
 		PeerName:  "VETH" + request.NetworkID[:4],
 	}
 
-	response = &network.JoinResponse{
-		InterfaceName: network.InterfaceName{
+	response = &pluginapi.JoinResponse{
+		InterfaceName: pluginapi.InterfaceName{
 			SrcName:   vETH.PeerName,
 			DstPrefix: "narf",
 		},
@@ -409,7 +446,7 @@ func (d *driver) Join(
 }
 
 func (d *driver) Leave(
-	request *network.LeaveRequest,
+	request *pluginapi.LeaveRequest,
 ) (err error) {
 	log.Println("Leave")
 	//err = &driverapi.ErrNotImplemented{}
@@ -417,7 +454,7 @@ func (d *driver) Leave(
 }
 
 func (d *driver) ProgramExternalConnectivity(
-	request *network.ProgramExternalConnectivityRequest,
+	request *pluginapi.ProgramExternalConnectivityRequest,
 ) (err error) {
 	log.Println("ProgramExternalConnectivity")
 	//err = &driverapi.ErrNotImplemented{}
@@ -425,7 +462,7 @@ func (d *driver) ProgramExternalConnectivity(
 }
 
 func (d *driver) RevokeExternalConnectivity(
-	request *network.RevokeExternalConnectivityRequest,
+	request *pluginapi.RevokeExternalConnectivityRequest,
 ) (err error) {
 	log.Println("RevokeExternalConnectivity")
 	//err = &driverapi.ErrNotImplemented{}
