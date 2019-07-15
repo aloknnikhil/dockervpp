@@ -76,6 +76,13 @@ func init() {
 }
 
 func (d *driver) Close() (err error) {
+	// Log errors, if any
+	defer func() {
+		if err != nil {
+			log.Printf("[Error] %s\n", err.Error())
+		}
+	}()
+
 	d.vppcnx.Disconnect()
 
 	// TODO: Clean shutdown docker plugin server
@@ -83,6 +90,13 @@ func (d *driver) Close() (err error) {
 }
 
 func (d *driver) Run(username string) (err error) {
+	// Log errors, if any
+	defer func() {
+		if err != nil {
+			log.Printf("[Error] %s\n", err.Error())
+		}
+	}()
+
 	d.Do(func() {
 
 		d.networks = make(map[string]*network)
@@ -130,6 +144,13 @@ func (d *driver) Run(username string) (err error) {
 func (d *driver) AllocateNetwork(
 	request *pluginapi.AllocateNetworkRequest,
 ) (response *pluginapi.AllocateNetworkResponse, err error) {
+	// Log errors, if any
+	defer func() {
+		if err != nil {
+			log.Printf("[Error] %s\n", err.Error())
+		}
+	}()
+
 	log.Println("AllocateNetwork")
 	//err = &driverapi.ErrNotImplemented{}
 	return
@@ -138,6 +159,13 @@ func (d *driver) AllocateNetwork(
 func (d *driver) CreateEndpoint(
 	request *pluginapi.CreateEndpointRequest,
 ) (response *pluginapi.CreateEndpointResponse, err error) {
+	// Log errors, if any
+	defer func() {
+		if err != nil {
+			log.Printf("[Error] %s\n", err.Error())
+		}
+	}()
+
 	log.Printf("CreateEndpoint - %+v\n", request)
 
 	if request.Interface == nil {
@@ -233,6 +261,13 @@ func (d *driver) CreateEndpoint(
 func (d *driver) CreateNetwork(
 	request *pluginapi.CreateNetworkRequest,
 ) (err error) {
+	// Log errors, if any
+	defer func() {
+		if err != nil {
+			log.Printf("[Error] %s\n", err.Error())
+		}
+	}()
+
 	log.Printf("CreateNetwork - %+v\n", request)
 
 	// Get Network ID
@@ -315,6 +350,13 @@ func (d *driver) CreateNetwork(
 func (d *driver) DeleteEndpoint(
 	request *pluginapi.DeleteEndpointRequest,
 ) (err error) {
+	// Log errors, if any
+	defer func() {
+		if err != nil {
+			log.Printf("[Error] %s\n", err.Error())
+		}
+	}()
+
 	log.Println("DeleteEndpoint")
 
 	// Check if the endpoint exists
@@ -356,6 +398,13 @@ func (d *driver) DeleteEndpoint(
 func (d *driver) DeleteNetwork(
 	request *pluginapi.DeleteNetworkRequest,
 ) (err error) {
+	// Log errors, if any
+	defer func() {
+		if err != nil {
+			log.Printf("[Error] %s\n", err.Error())
+		}
+	}()
+
 	log.Println("DeleteNetwork")
 
 	// Check if the network exists
@@ -389,6 +438,13 @@ func (d *driver) DeleteNetwork(
 func (d *driver) DiscoverDelete(
 	notification *pluginapi.DiscoveryNotification,
 ) (err error) {
+	// Log errors, if any
+	defer func() {
+		if err != nil {
+			log.Printf("[Error] %s\n", err.Error())
+		}
+	}()
+
 	log.Println("DiscoverDelete")
 	//err = &driverapi.ErrNotImplemented{}
 	return
@@ -397,6 +453,13 @@ func (d *driver) DiscoverDelete(
 func (d *driver) DiscoverNew(
 	notification *pluginapi.DiscoveryNotification,
 ) (err error) {
+	// Log errors, if any
+	defer func() {
+		if err != nil {
+			log.Printf("[Error] %s\n", err.Error())
+		}
+	}()
+
 	log.Println("DiscoverNew")
 	//err = &driverapi.ErrNotImplemented{}
 	return
@@ -405,6 +468,13 @@ func (d *driver) DiscoverNew(
 func (d *driver) EndpointInfo(
 	request *pluginapi.InfoRequest,
 ) (response *pluginapi.InfoResponse, err error) {
+	// Log errors, if any
+	defer func() {
+		if err != nil {
+			log.Printf("[Error] %s\n", err.Error())
+		}
+	}()
+
 	log.Println("EndpointInfo")
 	//err = &driverapi.ErrNotImplemented{}
 	return
@@ -413,6 +483,13 @@ func (d *driver) EndpointInfo(
 func (d *driver) FreeNetwork(
 	request *pluginapi.FreeNetworkRequest,
 ) (err error) {
+	// Log errors, if any
+	defer func() {
+		if err != nil {
+			log.Printf("[Error] %s\n", err.Error())
+		}
+	}()
+
 	log.Println("EndpointInfo")
 	//err = &driverapi.ErrNotImplemented{}
 	return
@@ -421,6 +498,13 @@ func (d *driver) FreeNetwork(
 func (d *driver) GetCapabilities() (
 	response *pluginapi.CapabilitiesResponse, err error,
 ) {
+	// Log errors, if any
+	defer func() {
+		if err != nil {
+			log.Printf("[Error] %s\n", err.Error())
+		}
+	}()
+
 	log.Println("GetCapabilities")
 	response = &pluginapi.CapabilitiesResponse{Scope: pluginapi.LocalScope, ConnectivityScope: pluginapi.GlobalScope}
 	return
@@ -429,6 +513,13 @@ func (d *driver) GetCapabilities() (
 func (d *driver) Join(
 	request *pluginapi.JoinRequest,
 ) (response *pluginapi.JoinResponse, err error) {
+	// Log errors, if any
+	defer func() {
+		if err != nil {
+			log.Printf("[Error] %s\n", err.Error())
+		}
+	}()
+
 	log.Println("Join")
 
 	vETH := &netlink.Veth{
@@ -448,6 +539,13 @@ func (d *driver) Join(
 func (d *driver) Leave(
 	request *pluginapi.LeaveRequest,
 ) (err error) {
+	// Log errors, if any
+	defer func() {
+		if err != nil {
+			log.Printf("[Error] %s\n", err.Error())
+		}
+	}()
+
 	log.Println("Leave")
 	//err = &driverapi.ErrNotImplemented{}
 	return
@@ -456,6 +554,13 @@ func (d *driver) Leave(
 func (d *driver) ProgramExternalConnectivity(
 	request *pluginapi.ProgramExternalConnectivityRequest,
 ) (err error) {
+	// Log errors, if any
+	defer func() {
+		if err != nil {
+			log.Printf("[Error] %s\n", err.Error())
+		}
+	}()
+
 	log.Println("ProgramExternalConnectivity")
 	//err = &driverapi.ErrNotImplemented{}
 	return
@@ -464,6 +569,13 @@ func (d *driver) ProgramExternalConnectivity(
 func (d *driver) RevokeExternalConnectivity(
 	request *pluginapi.RevokeExternalConnectivityRequest,
 ) (err error) {
+	// Log errors, if any
+	defer func() {
+		if err != nil {
+			log.Printf("[Error] %s\n", err.Error())
+		}
+	}()
+
 	log.Println("RevokeExternalConnectivity")
 	//err = &driverapi.ErrNotImplemented{}
 	return
