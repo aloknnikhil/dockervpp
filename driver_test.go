@@ -1,7 +1,6 @@
 package dockervpp
 
 import (
-	"narfnet/vpp"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -10,9 +9,9 @@ import (
 func TestRun(t *testing.T) {
 	var err error
 
-	err = vpp.Client.Run("root")
+	err = Client.Run("root")
 	if assert.Nil(t, err) {
-		err = vpp.Client.Close()
+		err = Client.Close()
 		assert.Nil(t, err)
 	}
 }

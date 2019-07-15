@@ -51,6 +51,13 @@ func init() {
 	boltdb.Register()
 }
 
+func (d *driver) Close() (err error) {
+	d.vppcnx.Disconnect()
+
+	// TODO: Clean shutdown docker plugin server
+	return
+}
+
 func (d *driver) Run(username string) (err error) {
 	d.Do(func() {
 		// Init store
