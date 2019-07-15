@@ -166,7 +166,7 @@ func (d *driver) CreateEndpoint(
 		}
 	}()
 
-	log.Printf("CreateEndpoint - %+v\n", request)
+	log.Println("CreateEndpoint")
 
 	if request.Interface == nil {
 		err = errors.Wrap(err, "Invalid interface specified")
@@ -254,7 +254,6 @@ func (d *driver) CreateEndpoint(
 	// Add endpoint to network cache
 	network.endpoints = append(network.endpoints, device)
 	d.endpoints[request.EndpointID] = device
-	log.Printf("Created Endpoint - %+v\n", peer)
 	return
 }
 
@@ -268,13 +267,11 @@ func (d *driver) CreateNetwork(
 		}
 	}()
 
-	log.Printf("CreateNetwork - %+v\n", request)
+	log.Println("CreateNetwork")
 
 	// Get Network ID
-	networkID := request.NetworkID
 	if len(request.Options) == 0 {
 		err = errors.New("CreateNetwork: No create options specified")
-		log.Println(err.Error())
 		return
 	}
 
@@ -292,7 +289,6 @@ func (d *driver) CreateNetwork(
 			ok := false
 			if isIPV6, ok = value.(bool); !ok {
 				err = errors.Errorf("CreateNetwork: Invalid value for %s", netlabel.Prefix+netlabel.EnableIPv6)
-				log.Println(err.Error())
 				return
 			}
 
@@ -300,17 +296,14 @@ func (d *driver) CreateNetwork(
 			if isIPV6 {
 				if len(request.IPv6Data) == 0 {
 					err = errors.New("CreateNetwork: IPv6 requested but no subnet specified")
-					log.Println(err.Error())
 					return
 				}
 				if network.ipV6Gateway, _, err = net.ParseCIDR(request.IPv6Data[0].Gateway); err != nil {
 					err = errors.Errorf("CreateNetwork: Could not parse IPv6 Gateway: %s", err.Error())
-					log.Println(err.Error())
 					return
 				}
 				if _, network.ipV6Subnet, err = net.ParseCIDR(request.IPv6Data[0].Pool); err != nil {
 					err = errors.Errorf("CreateNetwork: Could not parse IPv6 Pool: %s", err.Error())
-					log.Println(err.Error())
 					return
 				}
 			}
@@ -321,29 +314,21 @@ func (d *driver) CreateNetwork(
 	if len(request.IPv4Data) == 0 {
 		if !isIPV6 {
 			err = errors.New("No IPv4/6 subnets specified")
-			log.Println(err.Error())
 			return
 		}
 	} else {
 		if network.ipV4Gateway, _, err = net.ParseCIDR(request.IPv4Data[0].Gateway); err != nil {
 			err = errors.Errorf("CreateNetwork: Could not parse IPv4 Gateway: %s", err.Error())
-			log.Println(err.Error())
 			return
 		}
 		if _, network.ipV4Subnet, err = net.ParseCIDR(request.IPv4Data[0].Pool); err != nil {
 			err = errors.Errorf("CreateNetwork: Could not parse IPv4 Pool: %s", err.Error())
-			log.Println(err.Error())
 			return
 		}
 	}
 
 	// Cache network
 	d.networks[request.NetworkID] = network
-
-	log.Printf(
-		"Stored network configuration - ID:%s; IPv4 Gateway: %+v; IPv4 Pool: %+v; IPv6 Gateway: %+v, IPv6 Pool: %+v",
-		networkID, network.ipV4Gateway, network.ipV4Subnet, network.ipV6Gateway, network.ipV6Subnet,
-	)
 	return
 }
 
@@ -390,8 +375,6 @@ func (d *driver) DeleteEndpoint(
 
 	// Set link state to reflect state in other caches
 	endpoint.state = netlink.OperNotPresent
-
-	log.Printf("Endpoint - %+v deleted\n", request.EndpointID)
 	return
 }
 
@@ -490,7 +473,7 @@ func (d *driver) FreeNetwork(
 		}
 	}()
 
-	log.Println("EndpointInfo")
+	log.Println("FreeNetwork")
 	//err = &driverapi.ErrNotImplemented{}
 	return
 }
