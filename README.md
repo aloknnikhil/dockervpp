@@ -70,3 +70,17 @@ Thanks @araxus for bootstrapping the driver code.
 // | +-----------------------------+       |        |                               |        |       +---------------------------+ |
 // +---------------------------------------+--------+                               +--------+-------------------------------------+
 ```
+
+## **Build Instructions**
+#### Copy/Integrate the vpp.Makefile & gen.go templates into your project build
+```
+make -f vpp.Makefile api
+```
+
+## **Testing**
+```
+# Root permissions for elevating privileges to setup the docker plugin/modify network interfaces
+# Alternately, grant NETCAP_ADMIN privileges and grant user permissions to read/write the docker plugin directory
+# Also, grant user permissions to read/write to the VPP client sock/shared mem
+sudo /usr/bin/go test -v -timeout 0s dockervpp -run ^TestRun
+```
