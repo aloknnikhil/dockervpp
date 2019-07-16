@@ -35,7 +35,10 @@ var Client driver
 // Skips the default bridge domain
 var bridgeID uint32 = 1
 
+// TODO: Consolidate device & vppinterface structs
 type device struct {
+	// Maps to the other end of the device in VPP
+	*vppinterface
 	netlink.Link
 	state     netlink.LinkOperState
 	id        string
@@ -44,7 +47,7 @@ type device struct {
 
 type network struct {
 	// Maps to a bridge configuration in VPP
-	*bridge
+	*vppbridge
 	id          string
 	options     map[string]interface{}
 	ipV4Gateway net.IP
@@ -253,14 +256,9 @@ func (d *driver) CreateEndpoint(
 	// Cache VETH
 	device.Link = vETH
 
-	// Add other end of the VETH to the VPP bridge
-	var vhost *netinterface
-	if vhost, err = createHostInterface(d.vppapi, vETH); err != nil {
+	// Initialize the other end of the VETH in VPP
+	if device.vppinterface, err = createHostInterface(d.vppapi, vETH); err != nil {
 		err = errors.Wrap(err, "createHostInterface()")
-		return
-	}
-	if err = network.bridge.AddInterface(vhost, l2.L2_API_PORT_TYPE_NORMAL); err != nil {
-		err = errors.Wrap(err, "network.bridge.AddInterface()")
 		return
 	}
 
@@ -341,12 +339,12 @@ func (d *driver) CreateNetwork(
 	}
 
 	// Create VPP bridge
-	network.bridge = &bridge{
+	network.vppbridge = &vppbridge{
 		Channel: d.vppapi,
 		ID:      bridgeID,
 	}
-	if err = network.bridge.CreateGateway(network.ipV4Gateway, network.ipV4Subnet, nil); err != nil {
-		err = errors.Wrap(err, "bridge.CreateGateway()")
+	if err = network.vppbridge.CreateGateway(network.ipV4Gateway, network.ipV4Subnet, nil); err != nil {
+		err = errors.Wrap(err, "vppbridge.CreateGateway()")
 		return
 	}
 	bridgeID++
@@ -437,12 +435,12 @@ func (d *driver) DeleteNetwork(
 	}
 
 	// Delete the network bridge
-	if network.bridge != nil {
-		if err = network.bridge.Close(); err != nil {
-			err = errors.Wrap(err, "network.bridge.Close()")
+	if network.vppbridge != nil {
+		if err = network.vppbridge.Close(); err != nil {
+			err = errors.Wrap(err, "network.vppbridge.Close()")
 			return
 		}
-		network.bridge = nil
+		network.vppbridge = nil
 	}
 
 	// Delete from cache
@@ -538,16 +536,41 @@ func (d *driver) Join(
 
 	log.Println("Join")
 
-	vETH := &netlink.Veth{
-		LinkAttrs: netlink.LinkAttrs{Name: "VPP" + request.NetworkID[:4]},
-		PeerName:  "VETH" + request.NetworkID[:4],
+	var network *network
+	var ok bool
+	if network, ok = d.networks[request.NetworkID]; !ok {
+		err = errors.Errorf("Network - %s doesn't exist", request.NetworkID)
+		return
+	}
+
+	var intfc *device
+	if intfc, ok = d.endpoints[request.EndpointID]; !ok {
+		err = errors.Errorf("Endpoint - %s doesn't exist", request.EndpointID)
+		return
+	}
+
+	if err = network.vppbridge.AddInterface(intfc.vppinterface, l2.L2_API_PORT_TYPE_NORMAL); err != nil {
+		err = errors.Wrap(err, "network.vppbridge.AddInterface()")
+		return
+	}
+	if err = intfc.vppinterface.Up(); err != nil {
+		err = errors.Wrap(err, "vhost.Up()")
+		return
 	}
 
 	response = &pluginapi.JoinResponse{
 		InterfaceName: pluginapi.InterfaceName{
-			SrcName:   vETH.PeerName,
 			DstPrefix: "narf",
 		},
+	}
+
+	switch link := intfc.Link.(type) {
+	case *netlink.Veth:
+		response.InterfaceName.SrcName = link.PeerName
+	default:
+		response = nil
+		err = errors.Errorf("Endpoint - %s unknown type", request.EndpointID)
+		return
 	}
 	return
 }
