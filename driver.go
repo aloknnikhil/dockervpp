@@ -31,6 +31,10 @@ const (
 // Client to interact with VPP
 var Client driver
 
+// Monotonic Bridge ID counter
+// Skips the default bridge domain
+var bridgeID uint32 = 1
+
 type device struct {
 	netlink.Link
 	state     netlink.LinkOperState
@@ -327,11 +331,13 @@ func (d *driver) CreateNetwork(
 	// Create VPP bridge
 	network.bridge = &bridge{
 		Channel: d.vppapi,
+		ID:      bridgeID,
 	}
 	if err = network.bridge.CreateGateway(network.ipV4Gateway, nil); err != nil {
 		err = errors.Wrap(err, "bridge.CreateGateway()")
 		return
 	}
+	bridgeID++
 
 	// Cache network
 	d.networks[request.NetworkID] = network
@@ -418,9 +424,14 @@ func (d *driver) DeleteNetwork(
 		}
 	}
 
-	// Create a bridge for the network
-
-	// Create loopback BVI (Bridge Virtual Interface) for the gateway
+	// Delete the network bridge
+	if network.bridge != nil {
+		if err = network.bridge.Close(); err != nil {
+			err = errors.Wrap(err, "network.bridge.Close()")
+			return
+		}
+		network.bridge = nil
+	}
 
 	// Delete from cache
 	delete(d.networks, request.NetworkID)
