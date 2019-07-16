@@ -387,6 +387,12 @@ func (d *driver) DeleteEndpoint(
 			err = errors.Wrapf(err, "netlink.LinkDel(%+v)", peer)
 			return
 		}
+
+		// Delete VPP end of the link
+		if err = endpoint.vppinterface.Delete(); err != nil {
+			err = errors.Wrap(err, "endpoint.vppinterface.Delete()")
+			return
+		}
 	default:
 		err = errors.Errorf("Endpoint - %s unknown type", request.EndpointID)
 		return

@@ -15,12 +15,37 @@ import (
 	"github.com/pkg/errors"
 )
 
+type interfacetype int
+
+const (
+	// Intel Adaptive Virtual Function
+	avf interfacetype = iota
+	// AF_PACKET
+	host
+	// Loopback
+	loopback
+	// Memory interface
+	memif
+	// Remote Direct Memory Access
+	rdma
+	// Linux TAP
+	tap
+	// Virt-IO
+	virtio
+	// VMware Virtual Net Gen.3
+	vmxnet3
+	// QEMU virtual ethernet
+	vhost
+)
+
 type vppinterface struct {
 	api.Channel
+	interfacetype
 	swifidx interfaces.InterfaceIndex
 	address net.IP
 	subnet  *net.IPNet
 	mac     net.HardwareAddr
+	name    string
 }
 
 type vppbridge struct {
@@ -116,6 +141,8 @@ func (b *vppbridge) DeleteGateway() (err error) {
 	return
 }
 
+// Note: You cannot explicitly remove an interface from a bridge. It can only be transferred to another bridge
+// GoVPP, currently, lacks an API that allows an interface to be moved to an L3 mode from an L2 bridge mode
 func (b *vppbridge) AddInterface(vppinterface *vppinterface, portType l2.L2PortType) (err error) {
 	request := &l2.SwInterfaceSetL2Bridge{
 		RxSwIfIndex: uint32(vppinterface.swifidx),
@@ -142,14 +169,14 @@ func (b *vppbridge) AddInterface(vppinterface *vppinterface, portType l2.L2PortT
 	return
 }
 
-func (vppinterface *vppinterface) Up() (err error) {
+func (v *vppinterface) Up() (err error) {
 	uploop := &interfaces.SwInterfaceSetFlags{
-		SwIfIndex:   uint32(vppinterface.swifidx),
+		SwIfIndex:   uint32(v.swifidx),
 		AdminUpDown: 1,
 	}
 
 	// Dispatch request
-	ctx := vppinterface.Channel.SendRequest(uploop)
+	ctx := v.Channel.SendRequest(uploop)
 	uploopreply := &interfaces.SwInterfaceSetFlagsReply{}
 	if err = ctx.ReceiveReply(uploopreply); err != nil {
 		err = errors.Wrap(err, "ctx.ReceiveReply()")
@@ -157,6 +184,45 @@ func (vppinterface *vppinterface) Up() (err error) {
 	}
 	if uploopreply.Retval != 0 {
 		err = errors.Errorf("UpLoopbackReply: %d error", uploopreply.Retval)
+		return
+	}
+	return
+}
+
+func (v *vppinterface) Delete() (err error) {
+	switch v.interfacetype {
+	case loopback:
+		request := &interfaces.DeleteLoopback{
+			SwIfIndex: uint32(v.swifidx),
+		}
+		// Dispatch request
+		ctx := v.Channel.SendRequest(request)
+		response := &interfaces.DeleteLoopbackReply{}
+		if err = ctx.ReceiveReply(response); err != nil {
+			err = errors.Wrap(err, "ctx.ReceiveReply()")
+			return
+		}
+		if response.Retval != 0 {
+			err = errors.Errorf("DeleteLoopbackReply: %d error", response.Retval)
+			return
+		}
+	case host:
+		request := &af_packet.AfPacketDelete{
+			HostIfName: []byte(v.name),
+		}
+		// Dispatch request
+		ctx := v.Channel.SendRequest(request)
+		response := &af_packet.AfPacketDeleteReply{}
+		if err = ctx.ReceiveReply(response); err != nil {
+			err = errors.Wrap(err, "ctx.ReceiveReply()")
+			return
+		}
+		if response.Retval != 0 {
+			err = errors.Errorf("DeleteHostInterfaceReply: %d error", response.Retval)
+			return
+		}
+	default:
+		err = errors.Errorf("Endpoint type - %d unknown", v.interfacetype)
 		return
 	}
 	return
@@ -179,9 +245,10 @@ func createLoopbackInterface(api api.Channel, mac net.HardwareAddr) (intfc *vppi
 		return
 	}
 	intfc = &vppinterface{
-		Channel: api,
-		swifidx: interfaces.InterfaceIndex(createloopreply.SwIfIndex),
-		mac:     mac,
+		Channel:       api,
+		swifidx:       interfaces.InterfaceIndex(createloopreply.SwIfIndex),
+		mac:           mac,
+		interfacetype: loopback,
 	}
 	return
 }
@@ -207,16 +274,18 @@ func createHostInterface(api api.Channel, veth *netlink.Veth) (intfc *vppinterfa
 		return
 	}
 	intfc = &vppinterface{
-		Channel: api,
-		swifidx: interfaces.InterfaceIndex(response.SwIfIndex),
-		mac:     veth.HardwareAddr,
+		Channel:       api,
+		swifidx:       interfaces.InterfaceIndex(response.SwIfIndex),
+		mac:           veth.HardwareAddr,
+		interfacetype: host,
+		name:          veth.Attrs().Name,
 	}
 	return
 }
 
-func (vppinterface *vppinterface) SetAddress(address net.IP, subnet *net.IPNet) (err error) {
+func (v *vppinterface) SetAddress(address net.IP, subnet *net.IPNet) (err error) {
 	setaddress := &interfaces.SwInterfaceAddDelAddress{
-		SwIfIndex:     uint32(vppinterface.swifidx),
+		SwIfIndex:     uint32(v.swifidx),
 		IsAdd:         1,
 		IsIPv6:        0,
 		DelAll:        0,
@@ -225,7 +294,7 @@ func (vppinterface *vppinterface) SetAddress(address net.IP, subnet *net.IPNet) 
 	}
 
 	// Dispatch request
-	ctx := vppinterface.Channel.SendRequest(setaddress)
+	ctx := v.Channel.SendRequest(setaddress)
 	setaddressreply := &interfaces.SwInterfaceAddDelAddressReply{}
 	if err = ctx.ReceiveReply(setaddressreply); err != nil {
 		err = errors.Wrap(err, "ctx.ReceiveReply()")
@@ -235,7 +304,7 @@ func (vppinterface *vppinterface) SetAddress(address net.IP, subnet *net.IPNet) 
 		err = errors.Errorf("SetAddressReply: %d error", setaddressreply.Retval)
 		return
 	}
-	vppinterface.address = address
-	vppinterface.subnet = subnet
+	v.address = address
+	v.subnet = subnet
 	return
 }
