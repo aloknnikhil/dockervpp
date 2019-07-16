@@ -1,6 +1,7 @@
 package dockervpp
 
 import (
+	"dockervpp/bin_api/l2"
 	"log"
 	"net"
 	"os/user"
@@ -22,10 +23,9 @@ import (
 	"github.com/vishvananda/netlink"
 )
 
-// Configuration for the default store path & VPP API socket path
+// Configuration for the VPP API socket path
 const (
-	KVStorePath string = "/var/lib/narf/vpp/driver.db"
-	VPPAPISock  string = "/var/run/vpp/vpp-api.sock"
+	VPPAPISock string = "/var/run/vpp/vpp-api.sock"
 )
 
 // Client to interact with VPP
@@ -60,6 +60,7 @@ type driver struct {
 	sync.WaitGroup
 
 	// VPP client connection
+	// TODO: Wrap client in a retryable client for repairs
 	vppcnx *core.Connection
 	vppapi api.Channel
 
@@ -252,6 +253,17 @@ func (d *driver) CreateEndpoint(
 	// Cache VETH
 	device.Link = vETH
 
+	// Add other end of the VETH to the VPP bridge
+	var vhost *netinterface
+	if vhost, err = createHostInterface(d.vppapi, vETH); err != nil {
+		err = errors.Wrap(err, "createHostInterface()")
+		return
+	}
+	if err = network.bridge.AddInterface(vhost, l2.L2_API_PORT_TYPE_NORMAL); err != nil {
+		err = errors.Wrap(err, "network.bridge.AddInterface()")
+		return
+	}
+
 	// Add endpoint to network cache
 	network.endpoints = append(network.endpoints, device)
 	d.endpoints[request.EndpointID] = device
@@ -333,7 +345,7 @@ func (d *driver) CreateNetwork(
 		Channel: d.vppapi,
 		ID:      bridgeID,
 	}
-	if err = network.bridge.CreateGateway(network.ipV4Gateway, nil); err != nil {
+	if err = network.bridge.CreateGateway(network.ipV4Gateway, network.ipV4Subnet, nil); err != nil {
 		err = errors.Wrap(err, "bridge.CreateGateway()")
 		return
 	}

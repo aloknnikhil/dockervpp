@@ -1,11 +1,13 @@
 package dockervpp
 
 import (
+	"dockervpp/bin_api/af_packet"
 	"dockervpp/bin_api/interfaces"
 	"dockervpp/bin_api/l2"
 	"log"
-	"math"
 	"net"
+
+	"github.com/vishvananda/netlink"
 
 	"github.com/docker/libnetwork/netutils"
 
@@ -13,15 +15,19 @@ import (
 	"github.com/pkg/errors"
 )
 
-const (
-	macPrefix = "af:be:cd:00:"
-)
+type netinterface struct {
+	api.Channel
+	swifidx interfaces.InterfaceIndex
+	address net.IP
+	subnet  *net.IPNet
+	mac     net.HardwareAddr
+}
 
 type bridge struct {
 	api.Channel
 	ID       uint32
-	gateway  interfaces.InterfaceIndex
-	segments []interfaces.InterfaceIndex
+	gateway  *netinterface
+	segments []*netinterface
 }
 
 func (b *bridge) Close() (err error) {
@@ -36,7 +42,7 @@ func (b *bridge) Close() (err error) {
 }
 
 // mac - Optional
-func (b *bridge) CreateGateway(address net.IP, mac net.HardwareAddr) (err error) {
+func (b *bridge) CreateGateway(address net.IP, subnet *net.IPNet, mac net.HardwareAddr) (err error) {
 	if b.Channel == nil {
 		err = errors.New("No VPP client session")
 		return
@@ -54,81 +60,26 @@ func (b *bridge) CreateGateway(address net.IP, mac net.HardwareAddr) (err error)
 	log.Printf("Creating gateway with IP: %s, Mac: %s\n", address, mac)
 
 	// Step 1: Create Loopback Interface
-	createloop := &interfaces.CreateLoopback{
-		MacAddress: mac,
-	}
-
-	// Dispatch request
-	ctx := b.Channel.SendRequest(createloop)
-	createloopreply := &interfaces.CreateLoopbackReply{}
-	if err = ctx.ReceiveReply(createloopreply); err != nil {
-		err = errors.Wrap(err, "ctx.ReceiveReply()")
+	if b.gateway, err = createLoopbackInterface(b.Channel, mac); err != nil {
+		err = errors.Wrap(err, "createLoopbackInterface()")
 		return
 	}
-	if createloopreply.Retval != 0 {
-		err = errors.Errorf("CreateLoopbackReply: %d error", createloopreply.Retval)
-		return
-	}
-	b.gateway = interfaces.InterfaceIndex(createloopreply.SwIfIndex)
 
 	// Step 2: Add loopback to bridge
-	addloop := &l2.SwInterfaceSetL2Bridge{
-		RxSwIfIndex: uint32(b.gateway),
-		BdID:        b.ID,
-		PortType:    l2.L2_API_PORT_TYPE_BVI,
-		Enable:      1,
-		Shg:         0,
-	}
-
-	// Dispatch request
-	ctx = b.Channel.SendRequest(addloop)
-	addloopreply := &l2.SwInterfaceSetL2BridgeReply{}
-	if err = ctx.ReceiveReply(addloopreply); err != nil {
-		err = errors.Wrap(err, "ctx.ReceiveReply()")
-		return
-	}
-	if addloopreply.Retval != 0 {
-		err = errors.Errorf("AddLoopBackReply: %d error", addloopreply.Retval)
+	if err = b.AddInterface(b.gateway, l2.L2_API_PORT_TYPE_BVI); err != nil {
+		err = errors.Wrap(err, "b.AddInterface()")
 		return
 	}
 
 	// Step 3: Set interface state up
-	uploop := &interfaces.SwInterfaceSetFlags{
-		SwIfIndex:   uint32(b.gateway),
-		AdminUpDown: 1,
-	}
-
-	// Dispatch request
-	ctx = b.Channel.SendRequest(uploop)
-	uploopreply := &interfaces.SwInterfaceSetFlagsReply{}
-	if err = ctx.ReceiveReply(uploopreply); err != nil {
-		err = errors.Wrap(err, "ctx.ReceiveReply()")
-		return
-	}
-	if uploopreply.Retval != 0 {
-		err = errors.Errorf("UpLoopbackReply: %d error", uploopreply.Retval)
+	if err = b.gateway.Up(); err != nil {
+		err = errors.Wrap(err, "gateway.Up()")
 		return
 	}
 
 	// Step 4: Set interface address
-	setaddress := &interfaces.SwInterfaceAddDelAddress{
-		SwIfIndex:     uint32(b.gateway),
-		IsAdd:         1,
-		IsIPv6:        0,
-		DelAll:        0,
-		AddressLength: 24,
-		Address:       address.To4(),
-	}
-
-	// Dispatch request
-	ctx = b.Channel.SendRequest(setaddress)
-	setaddressreply := &interfaces.SwInterfaceAddDelAddressReply{}
-	if err = ctx.ReceiveReply(setaddressreply); err != nil {
-		err = errors.Wrap(err, "ctx.ReceiveReply()")
-		return
-	}
-	if setaddressreply.Retval != 0 {
-		err = errors.Errorf("SetAddressReply: %d error", uploopreply.Retval)
+	if err = b.gateway.SetAddress(address, subnet); err != nil {
+		err = errors.Wrapf(err, "gateway.SetAddress(%s)", address)
 		return
 	}
 	return
@@ -140,13 +91,13 @@ func (b *bridge) DeleteGateway() (err error) {
 		return
 	}
 
-	if b.gateway == math.MaxUint32 {
+	if b.gateway == nil {
 		err = errors.New("No active gateway")
 		return
 	}
 
 	request := &interfaces.DeleteLoopback{
-		SwIfIndex: uint32(b.gateway),
+		SwIfIndex: uint32(b.gateway.swifidx),
 	}
 
 	// Dispatch request
@@ -161,15 +112,130 @@ func (b *bridge) DeleteGateway() (err error) {
 		err = errors.Errorf("DeleteLoopbackReply: %d error", response.Retval)
 		return
 	}
-	b.gateway = math.MaxUint32
+	b.gateway = nil
 	return
 }
 
-func (b *bridge) AddSegment(intidx interfaces.InterfaceIndex) (err error) {
-	if b.Channel == nil {
-		err = errors.New("No VPP client session")
+func (b *bridge) AddInterface(netinterface *netinterface, portType l2.L2PortType) (err error) {
+	request := &l2.SwInterfaceSetL2Bridge{
+		RxSwIfIndex: uint32(netinterface.swifidx),
+		BdID:        b.ID,
+		PortType:    portType,
+		Enable:      1,
+		Shg:         0,
+	}
+
+	// Dispatch request
+	ctx := b.Channel.SendRequest(request)
+	response := &l2.SwInterfaceSetL2BridgeReply{}
+	if err = ctx.ReceiveReply(response); err != nil {
+		err = errors.Wrap(err, "ctx.ReceiveReply()")
+		return
+	}
+	if response.Retval != 0 {
+		err = errors.Errorf("AddLoopBackReply: %d error", response.Retval)
 		return
 	}
 
+	// Cache bridge segment
+	b.segments = append(b.segments, netinterface)
+	return
+}
+
+func (netinterface *netinterface) Up() (err error) {
+	uploop := &interfaces.SwInterfaceSetFlags{
+		SwIfIndex:   uint32(netinterface.swifidx),
+		AdminUpDown: 1,
+	}
+
+	// Dispatch request
+	ctx := netinterface.Channel.SendRequest(uploop)
+	uploopreply := &interfaces.SwInterfaceSetFlagsReply{}
+	if err = ctx.ReceiveReply(uploopreply); err != nil {
+		err = errors.Wrap(err, "ctx.ReceiveReply()")
+		return
+	}
+	if uploopreply.Retval != 0 {
+		err = errors.Errorf("UpLoopbackReply: %d error", uploopreply.Retval)
+		return
+	}
+	return
+}
+
+func createLoopbackInterface(api api.Channel, mac net.HardwareAddr) (intfc *netinterface, err error) {
+	createloop := &interfaces.CreateLoopback{
+		MacAddress: mac,
+	}
+
+	// Dispatch request
+	ctx := api.SendRequest(createloop)
+	createloopreply := &interfaces.CreateLoopbackReply{}
+	if err = ctx.ReceiveReply(createloopreply); err != nil {
+		err = errors.Wrap(err, "ctx.ReceiveReply()")
+		return
+	}
+	if createloopreply.Retval != 0 {
+		err = errors.Errorf("CreateLoopbackReply: %d error", createloopreply.Retval)
+		return
+	}
+	intfc = &netinterface{
+		Channel: api,
+		swifidx: interfaces.InterfaceIndex(createloopreply.SwIfIndex),
+		mac:     mac,
+	}
+	return
+}
+
+func createHostInterface(api api.Channel, veth *netlink.Veth) (intfc *netinterface, err error) {
+	if len(veth.Attrs().Name) > 64 {
+		err = errors.New("Interface name cannot be > 64 characters")
+		return
+	}
+	request := &af_packet.AfPacketCreate{
+		HostIfName:      []byte(veth.Attrs().Name),
+		HwAddr:          veth.HardwareAddr,
+		UseRandomHwAddr: 0,
+	}
+	ctx := api.SendRequest(request)
+	response := &af_packet.AfPacketCreateReply{}
+	if err = ctx.ReceiveReply(response); err != nil {
+		err = errors.Wrap(err, "ctx.ReceiveReply()")
+		return
+	}
+	if response.Retval != 0 {
+		err = errors.Errorf("AF_PACKETCreate: %d error", response.Retval)
+		return
+	}
+	intfc = &netinterface{
+		Channel: api,
+		swifidx: interfaces.InterfaceIndex(response.SwIfIndex),
+		mac:     veth.HardwareAddr,
+	}
+	return
+}
+
+func (netinterface *netinterface) SetAddress(address net.IP, subnet *net.IPNet) (err error) {
+	setaddress := &interfaces.SwInterfaceAddDelAddress{
+		SwIfIndex:     uint32(netinterface.swifidx),
+		IsAdd:         1,
+		IsIPv6:        0,
+		DelAll:        0,
+		AddressLength: 24,
+		Address:       address.To4(),
+	}
+
+	// Dispatch request
+	ctx := netinterface.Channel.SendRequest(setaddress)
+	setaddressreply := &interfaces.SwInterfaceAddDelAddressReply{}
+	if err = ctx.ReceiveReply(setaddressreply); err != nil {
+		err = errors.Wrap(err, "ctx.ReceiveReply()")
+		return
+	}
+	if setaddressreply.Retval != 0 {
+		err = errors.Errorf("SetAddressReply: %d error", setaddressreply.Retval)
+		return
+	}
+	netinterface.address = address
+	netinterface.subnet = subnet
 	return
 }
