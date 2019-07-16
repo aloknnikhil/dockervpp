@@ -33,14 +33,6 @@
   version = "v0.4.12"
 
 [[projects]]
-  digest = "1:a12d94258c5298ead75e142e8001224bf029f302fed9e96cd39c0eaf90f3954d"
-  name = "github.com/boltdb/bolt"
-  packages = ["."]
-  pruneopts = "NUT"
-  revision = "2f1ce7a837dcb8da3ec595b1dac9d0632f0f99e8"
-  version = "v1.3.1"
-
-[[projects]]
   digest = "1:5155f7153c694dc8e2efd74d799a27fd54e65778fa3f0c3e17626df724857db9"
   name = "github.com/coreos/go-systemd"
   packages = ["activation"]
@@ -92,21 +84,13 @@
   revision = "1e6269c305b8c75cfda1c8aa91349c38d7335814"
 
 [[projects]]
-  digest = "1:f746d8e02419c492ec284c7badcc73f7146f14e2df119e8e5d5b1a376c6d82c3"
-  name = "github.com/docker/libkv"
-  packages = [
-    ".",
-    "store",
-    "store/boltdb",
-  ]
-  pruneopts = "NUT"
-  revision = "aabc039ad04deb721e234f99cd1b4aa28ac71a40"
-  version = "v0.2.1"
-
-[[projects]]
-  digest = "1:275a6fde6061ac480f29d46ba8e25da8da6f8bbed5e7284427c1379fc2faaf66"
+  digest = "1:ede17b114d9a080bc65bd76cf8103505c92cb68f5740b2a3b4f59e3bb611da9b"
   name = "github.com/docker/libnetwork"
-  packages = ["netlabel"]
+  packages = [
+    "netlabel",
+    "netutils",
+    "types",
+  ]
   pruneopts = "NUT"
   revision = "1ee720e18fe98dceda6039bdd005ffbcb359d343"
   version = "v0.5.6"
@@ -160,22 +144,9 @@
   version = "v1.4.2"
 
 [[projects]]
-  digest = "1:60a46e2410edbf02b419f833372dd1d24d7aa1b916a990a7370e792fada1eadd"
-  name = "github.com/stretchr/objx"
-  packages = ["."]
-  pruneopts = "NUT"
-  revision = "477a77ecc69700c7cdeb1fa9e129548e1c1c393c"
-  version = "v0.1.1"
-
-[[projects]]
-  digest = "1:ee1d3a6f3750629a4b4d2f58355294670b3db0e564fd709944076a6e802ab7bc"
+  digest = "1:42e8c2456d7ec0f31e182c20022e74324c4da2cb3bd9069ff9b131fe33466308"
   name = "github.com/stretchr/testify"
-  packages = [
-    ".",
-    "assert",
-    "http",
-    "mock",
-  ]
+  packages = ["assert"]
   pruneopts = "NUT"
   revision = "ffdc059bfe9ce6a4e144ba849dbedead332c6053"
   version = "v1.3.0"
@@ -230,12 +201,11 @@
     "github.com/FDio/govpp",
     "github.com/docker/docker/pkg/plugins",
     "github.com/docker/go-plugins-helpers/network",
-    "github.com/docker/libkv",
-    "github.com/docker/libkv/store",
-    "github.com/docker/libkv/store/boltdb",
     "github.com/docker/libnetwork/netlabel",
+    "github.com/docker/libnetwork/netutils",
+    "github.com/lunixbochs/struc",
     "github.com/pkg/errors",
-    "github.com/stretchr/testify",
+    "github.com/stretchr/testify/assert",
     "github.com/vishvananda/netlink",
     "github.com/vishvananda/netns",
   ]

@@ -8,16 +8,15 @@ import (
 	"sync"
 	"syscall"
 
-	"github.com/vishvananda/netns"
+	"git.fd.io/govpp.git/core"
 
 	"git.fd.io/govpp.git/api"
+	"github.com/vishvananda/netns"
 
 	"github.com/FDio/govpp"
 
-	"git.fd.io/govpp.git/core"
 	"github.com/docker/docker/pkg/plugins"
 	pluginapi "github.com/docker/go-plugins-helpers/network"
-	"github.com/docker/libkv/store/boltdb"
 	"github.com/docker/libnetwork/netlabel"
 	"github.com/pkg/errors"
 	"github.com/vishvananda/netlink"
@@ -40,6 +39,8 @@ type device struct {
 }
 
 type network struct {
+	// Maps to a bridge configuration in VPP
+	*bridge
 	id          string
 	options     map[string]interface{}
 	ipV4Gateway net.IP
@@ -69,10 +70,6 @@ type driver struct {
 	networks map[string]*network
 	// Endpoint ID -> dockervpp.device
 	endpoints map[string]*device
-}
-
-func init() {
-	boltdb.Register()
 }
 
 func (d *driver) Close() (err error) {
@@ -327,6 +324,15 @@ func (d *driver) CreateNetwork(
 		}
 	}
 
+	// Create VPP bridge
+	network.bridge = &bridge{
+		Channel: d.vppapi,
+	}
+	if err = network.bridge.CreateGateway(network.ipV4Gateway, nil); err != nil {
+		err = errors.Wrap(err, "bridge.CreateGateway()")
+		return
+	}
+
 	// Cache network
 	d.networks[request.NetworkID] = network
 	return
@@ -411,6 +417,10 @@ func (d *driver) DeleteNetwork(
 			}
 		}
 	}
+
+	// Create a bridge for the network
+
+	// Create loopback BVI (Bridge Virtual Interface) for the gateway
 
 	// Delete from cache
 	delete(d.networks, request.NetworkID)
