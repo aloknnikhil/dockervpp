@@ -5,6 +5,7 @@ import (
 	"log"
 	"net"
 	"os/user"
+	"reflect"
 	"strconv"
 	"sync"
 	"syscall"
@@ -15,6 +16,8 @@ import (
 	"github.com/vishvananda/netns"
 
 	"github.com/FDio/govpp"
+
+	"github.com/docker/libnetwork/types"
 
 	"github.com/docker/docker/pkg/plugins"
 	pluginapi "github.com/docker/go-plugins-helpers/network"
@@ -31,6 +34,9 @@ const (
 // Client to interact with VPP
 var Client driver
 
+// General NAT API helper
+var natclient *vppnat
+
 // Monotonic Bridge ID counter
 // Skips the default bridge domain
 var bridgeID uint32 = 1
@@ -38,8 +44,9 @@ var bridgeID uint32 = 1
 // TODO: Consolidate device & vppinterface structs
 type device struct {
 	// Maps to the other end of the device in VPP
-	*vppinterface
+	peer *vppinterface
 	netlink.Link
+	address   net.IP
 	state     netlink.LinkOperState
 	id        string
 	networkID string
@@ -78,6 +85,8 @@ type driver struct {
 	networks map[string]*network
 	// Endpoint ID -> dockervpp.device
 	endpoints map[string]*device
+	// NAT rules
+	natrules []*portmapping
 }
 
 func (d *driver) Close() (err error) {
@@ -115,6 +124,9 @@ func (d *driver) Run(username string) (err error) {
 		if d.vppapi, err = d.vppcnx.NewAPIChannel(); err != nil {
 			err = errors.Wrap(err, "vpp.NewAPIChannel()")
 			return
+		}
+		natclient = &vppnat{
+			Channel: d.vppapi,
 		}
 
 		// Setup Netlink handle
@@ -186,11 +198,6 @@ func (d *driver) CreateEndpoint(
 		return
 	}
 
-	device := &device{
-		id:        request.EndpointID,
-		networkID: request.NetworkID,
-	}
-
 	// Create VETH pair for end-point
 	vETH := &netlink.Veth{
 		LinkAttrs: netlink.LinkAttrs{Name: "VPP" + request.NetworkID[:4]},
@@ -230,8 +237,9 @@ func (d *driver) CreateEndpoint(
 	}
 
 	// Set IP address
+	var ip4 *netlink.Addr
+	var ip6 *netlink.Addr
 	if len(request.Interface.Address) != 0 {
-		var ip4 *netlink.Addr
 		if ip4, err = netlink.ParseAddr(request.Interface.Address); err != nil {
 			err = errors.Wrapf(err, "netlink.ParseAddr(%s)", request.Interface.Address)
 			return
@@ -242,7 +250,6 @@ func (d *driver) CreateEndpoint(
 		}
 	}
 	if len(request.Interface.AddressIPv6) != 0 {
-		var ip6 *netlink.Addr
 		if ip6, err = netlink.ParseAddr(request.Interface.AddressIPv6); err != nil {
 			err = errors.Wrapf(err, "netlink.ParseAddr(%s)", request.Interface.AddressIPv6)
 			return
@@ -254,10 +261,18 @@ func (d *driver) CreateEndpoint(
 	}
 
 	// Cache VETH
-	device.Link = vETH
+	device := &device{
+		id:        request.EndpointID,
+		networkID: request.NetworkID,
+		Link:      vETH,
+	}
+
+	if ip4 != nil {
+		device.address = ip4.IP
+	}
 
 	// Initialize the other end of the VETH in VPP
-	if device.vppinterface, err = createHostInterface(d.vppapi, vETH); err != nil {
+	if device.peer, err = createHostInterface(d.vppapi, vETH); err != nil {
 		err = errors.Wrap(err, "createHostInterface()")
 		return
 	}
@@ -349,6 +364,12 @@ func (d *driver) CreateNetwork(
 	}
 	bridgeID++
 
+	// Set gateway as inside NAT
+	if err = natclient.Enable(network.gateway, in); err != nil {
+		err = errors.Wrap(err, "natclient.Enable()")
+		return
+	}
+
 	// Cache network
 	d.networks[request.NetworkID] = network
 	return
@@ -389,7 +410,7 @@ func (d *driver) DeleteEndpoint(
 		}
 
 		// Delete VPP end of the link
-		if err = endpoint.vppinterface.Delete(); err != nil {
+		if err = endpoint.peer.Delete(); err != nil {
 			err = errors.Wrap(err, "endpoint.vppinterface.Delete()")
 			return
 		}
@@ -555,11 +576,11 @@ func (d *driver) Join(
 		return
 	}
 
-	if err = network.vppbridge.AddInterface(intfc.vppinterface, l2.L2_API_PORT_TYPE_NORMAL); err != nil {
+	if err = network.vppbridge.AddInterface(intfc.peer, l2.L2_API_PORT_TYPE_NORMAL); err != nil {
 		err = errors.Wrap(err, "network.vppbridge.AddInterface()")
 		return
 	}
-	if err = intfc.vppinterface.Up(); err != nil {
+	if err = intfc.peer.Up(); err != nil {
 		err = errors.Wrap(err, "vhost.Up()")
 		return
 	}
@@ -568,6 +589,8 @@ func (d *driver) Join(
 		InterfaceName: pluginapi.InterfaceName{
 			DstPrefix: "narf",
 		},
+		DisableGatewayService: false,
+		Gateway:               network.gateway.address.String(),
 	}
 
 	switch link := intfc.Link.(type) {
@@ -607,7 +630,86 @@ func (d *driver) ProgramExternalConnectivity(
 	}()
 
 	log.Println("ProgramExternalConnectivity")
-	//err = &driverapi.ErrNotImplemented{}
+
+	// Get endpoint
+	var endpoint *device
+	var ok bool
+	if endpoint, ok = d.endpoints[request.EndpointID]; !ok {
+		err = errors.Errorf("Endpoint - %s doesn't exist", request.EndpointID)
+		return
+	}
+
+	// Parse connectivity options
+	for key, value := range request.Options {
+		switch key {
+		case "com.docker.network.portmap":
+			var mapping []interface{}
+			var ok bool
+			if mapping, ok = value.([]interface{}); !ok {
+				err = types.BadRequestErrorf("Invalid port mapping data in configuration: %+v - Type: %s", value, reflect.TypeOf(value))
+				return
+			}
+			var rules []portmapping
+			for _, element := range mapping {
+
+				var portmap map[string]interface{}
+				if portmap, ok = element.(map[string]interface{}); !ok {
+					err = types.BadRequestErrorf("Invalid port mapping data in configuration: %+v - Type: %s", element, reflect.TypeOf(element))
+					return
+				}
+
+				// Read host port
+				if value, ok = portmap["HostPort"]; !ok {
+					err = errors.New("No host port specified in port mapping configuration")
+					return
+				}
+				var externalport float64
+				if externalport, ok = value.(float64); !ok {
+					err = errors.Errorf("Invalid HostPort value - %+v", value)
+					return
+				}
+
+				// Read internal port
+				if value, ok = portmap["Port"]; !ok {
+					err = errors.New("No local port specified in port mapping configuration")
+					return
+				}
+				var internalport float64
+				if internalport, ok = value.(float64); !ok {
+					err = errors.Errorf("Invalid Port value - %+v", value)
+					return
+				}
+
+				// Read protocol type
+				if value, ok = portmap["Proto"]; !ok {
+					err = errors.New("No protocol type specified in port mapping configuration")
+					return
+				}
+				var proto float64
+				if proto, ok = value.(float64); !ok {
+					err = errors.Errorf("Invalid Protocol value - %+v", value)
+					return
+				}
+
+				rule := portmapping{
+					internalip:   endpoint.address,
+					internalport: port(internalport),
+					externalport: port(externalport),
+					protocol:     uint8(proto),
+				}
+				rules = append(rules, rule)
+			}
+
+			// Program VPP
+			if err = natclient.MapPorts(rules); err != nil {
+				err = errors.Wrapf(err, "nat.MapPorts(%+v)", rules)
+				return
+			}
+		default:
+			log.Printf("[WARN] Unknown configuration key - %s; Ignoring", key)
+		}
+	}
+
 	return
 }
 
@@ -622,6 +724,6 @@ func (d *driver) RevokeExternalConnectivity(
 	}()
 
 	log.Println("RevokeExternalConnectivity")
-	//err = &driverapi.ErrNotImplemented{}
+	// DO NOTHING
 	return
 }

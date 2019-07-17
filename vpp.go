@@ -4,6 +4,7 @@ import (
 	"dockervpp/bin_api/af_packet"
 	"dockervpp/bin_api/interfaces"
 	"dockervpp/bin_api/l2"
+	"dockervpp/bin_api/nat"
 	"log"
 	"net"
 
@@ -16,10 +17,13 @@ import (
 )
 
 type interfacetype int
+type port uint16
 
 const (
+	// Unknown
+	unknown interfacetype = iota
 	// Intel Adaptive Virtual Function
-	avf interfacetype = iota
+	avf
 	// AF_PACKET
 	host
 	// Loopback
@@ -53,6 +57,126 @@ type vppbridge struct {
 	ID       uint32
 	gateway  *vppinterface
 	segments []*vppinterface
+}
+
+type portmapping struct {
+	protocol     uint8
+	internalip   net.IP
+	internalport port
+	externalport port
+}
+
+type nattype uint8
+
+const (
+	out nattype = iota
+	in
+)
+
+type vppnat struct {
+	api.Channel
+	external *vppinterface
+	mapping  []portmapping
+}
+
+func (n *vppnat) Enable(vppinterface *vppinterface, nattype nattype) (err error) {
+	request := &nat.Nat44InterfaceAddDelFeature{
+		IsAdd:     1,
+		IsInside:  uint8(nattype),
+		SwIfIndex: uint32(vppinterface.swifidx),
+	}
+	ctx := n.Channel.SendRequest(request)
+	response := &nat.Nat44InterfaceAddDelFeatureReply{}
+	if err = ctx.ReceiveReply(response); err != nil {
+		err = errors.Wrap(err, "ctx.ReceiveReply()")
+		return
+	}
+
+	if response.Retval != 0 {
+		err = errors.Errorf("Nat44EnableInterfaceFeature: %d error", response.Retval)
+		return
+	}
+
+	return
+}
+
+func (n *vppnat) Disable(vppinterface *vppinterface, nattype nattype) (err error) {
+	request := &nat.Nat44InterfaceAddDelFeature{
+		IsAdd:     0,
+		IsInside:  uint8(nattype),
+		SwIfIndex: uint32(vppinterface.swifidx),
+	}
+	ctx := n.Channel.SendRequest(request)
+	response := &nat.Nat44InterfaceAddDelFeatureReply{}
+	if err = ctx.ReceiveReply(response); err != nil {
+		err = errors.Wrap(err, "ctx.ReceiveReply()")
+		return
+	}
+
+	if response.Retval != 0 {
+		err = errors.Errorf("Nat44DisableInterfaceFeature: %d error", response.Retval)
+		return
+	}
+
+	return
+}
+
+func (n *vppnat) MapPorts(maps []portmapping) (err error) {
+	if n.external == nil {
+		// Find an interface with NAT enabled to "out"
+		request := &nat.Nat44InterfaceDump{}
+		ctx := n.SendMultiRequest(request)
+		for {
+			response := &nat.Nat44InterfaceDetails{}
+			var stop bool
+			if stop, err = ctx.ReceiveReply(response); stop {
+				// Stop received; No interface was configured as the outside facing NAT interface
+				err = errors.New("No external interface configured for NAT out")
+				return
+			} else if err != nil {
+				err = errors.Wrap(err, "nat.Nat44InterfaceDump()")
+				return
+			}
+
+			if response.IsInside == 0 {
+				n.external = &vppinterface{
+					Channel:       n.Channel,
+					interfacetype: unknown,
+					swifidx:       interfaces.InterfaceIndex(response.SwIfIndex),
+				}
+				break
+			}
+		}
+	}
+
+	for _, portmap := range maps {
+		request := &nat.Nat44AddDelStaticMapping{
+			IsAdd:             1,
+			LocalIPAddress:    portmap.internalip.To4(),
+			Protocol:          portmap.protocol,
+			LocalPort:         uint16(portmap.internalport),
+			ExternalPort:      uint16(portmap.externalport),
+			ExternalSwIfIndex: uint32(n.external.swifidx),
+			TwiceNat:          0,
+			SelfTwiceNat:      0,
+		}
+		log.Printf("NAT Rule - %+v\n", request)
+		ctx := n.Channel.SendRequest(request)
+		response := &nat.Nat44AddDelStaticMappingReply{}
+		if err = ctx.ReceiveReply(response); err != nil {
+			err = errors.Wrap(err, "ctx.ReceiveReply()")
+			return
+		}
+		if response.Retval != 0 {
+			err = errors.Errorf("AddNat44Mapping: %d error", response.Retval)
+			return
+		}
+		// TODO: Rollback, if incomplete mapping
+	}
+
+	n.mapping = maps
+
+	return
 }
 
 func (b *vppbridge) Close() (err error) {
@@ -184,6 +308,26 @@ func (v *vppinterface) Up() (err error) {
 	}
 	if uploopreply.Retval != 0 {
 		err = errors.Errorf("UpLoopbackReply: %d error", uploopreply.Retval)
+		return
+	}
+	return
+}
+
+func (v *vppinterface) Down() (err error) {
+	downloop := &interfaces.SwInterfaceSetFlags{
+		SwIfIndex:   uint32(v.swifidx),
+		AdminUpDown: 0,
+	}
+
+	// Dispatch request
+	ctx := v.Channel.SendRequest(downloop)
+	downloopreply := &interfaces.SwInterfaceSetFlagsReply{}
+	if err = ctx.ReceiveReply(downloopreply); err != nil {
+		err = errors.Wrap(err, "ctx.ReceiveReply()")
+		return
+	}
+	if downloopreply.Retval != 0 {
+		err = errors.Errorf("UpLoopbackReply: %d error", downloopreply.Retval)
 		return
 	}
 	return
