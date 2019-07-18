@@ -123,7 +123,8 @@ func (d *driver) Run(username string) (err error) {
 			return
 		}
 		natclient = &vppnat{
-			Channel: d.vppapi,
+			Channel:       d.vppapi,
+			externalports: make(map[port]struct{}),
 		}
 
 		// Setup Netlink handle
@@ -518,7 +519,22 @@ func (d *driver) EndpointInfo(
 	}()
 
 	log.Println("EndpointInfo")
-	//err = &driverapi.ErrNotImplemented{}
+
+	// Get endpoint
+	var endpoint *device
+	var ok bool
+	if endpoint, ok = d.endpoints[request.EndpointID]; !ok {
+		err = errors.Errorf("Endpoint - %s doesn't exist", request.EndpointID)
+		return
+	}
+
+	response = &pluginapi.InfoResponse{
+		Value: make(map[string]string),
+	}
+
+	// Send a copy of the current endpoint configuration
+	response.Value[netlabel.MacAddress] = endpoint.Attrs().HardwareAddr.String()
+
 	return
 }
 
