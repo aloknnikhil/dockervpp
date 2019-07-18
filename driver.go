@@ -1,7 +1,6 @@
 package dockervpp
 
 import (
-	"dockervpp/bin_api/l2"
 	"log"
 	"net"
 	"os/user"
@@ -9,6 +8,8 @@ import (
 	"strconv"
 	"sync"
 	"syscall"
+
+	"github.com/dockervpp/bin_api/l2"
 
 	"git.fd.io/govpp.git/core"
 

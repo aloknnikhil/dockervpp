@@ -1,12 +1,13 @@
 package dockervpp
 
 import (
-	"dockervpp/bin_api/af_packet"
-	"dockervpp/bin_api/interfaces"
-	"dockervpp/bin_api/l2"
-	"dockervpp/bin_api/nat"
 	"log"
 	"net"
+
+	"github.com/dockervpp/bin_api/af_packet"
+	"github.com/dockervpp/bin_api/interfaces"
+	"github.com/dockervpp/bin_api/l2"
+	"github.com/dockervpp/bin_api/nat"
 
 	"github.com/vishvananda/netlink"
 
