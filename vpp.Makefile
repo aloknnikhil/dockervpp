@@ -1,6 +1,6 @@
 # This is a template for generating the VPP API client code
 # Copy this to your project root or integrate this into your build system
-# Run `make api` before using this library
+# Run `make api`, if running VPP version != 19.04
 #
 
 .PHONY: api

@@ -12,5 +12,4 @@
 *.out
 
 # Build artifacts
-bin_api/
 vendor/
