@@ -78,6 +78,8 @@ const (
 type vppnat struct {
 	api.Channel
 	external *vppinterface
+	// Cache
+	externalports map[port]struct{}
 }
 
 func (n *vppnat) Enable(vppinterface *vppinterface, nattype nattype) (err error) {
@@ -151,6 +153,14 @@ func (n *vppnat) MapPorts(maps []portmapping) (err error) {
 	}
 
 	for _, portmap := range maps {
+
+		// Check if external port is already used
+		var ok bool
+		if _, ok = n.externalports[portmap.externalport]; ok {
+			err = errors.Errorf("External port %d already used", portmap.externalport)
+			return
+		}
+
 		request := &nat.Nat44AddDelStaticMapping{
 			IsAdd:             1,
 			LocalIPAddress:    portmap.internalip.To4(),
@@ -171,6 +181,7 @@ func (n *vppnat) MapPorts(maps []portmapping) (err error) {
 			err = errors.Errorf("AddNat44Mapping: %d error", response.Retval)
 			return
 		}
+		n.externalports[portmap.externalport] = struct{}{}
 		// TODO: Rollback, if incomplete mapping
 	}
 
@@ -226,6 +237,7 @@ func (n *vppnat) UnmapPorts(maps []portmapping) (err error) {
 			err = errors.Errorf("DelNat44Mapping: %d error", response.Retval)
 			return
 		}
+		delete(n.externalports, portmap.externalport)
 		// TODO: Rollback, if incomplete mapping
 	}
 
