@@ -100,7 +100,7 @@ func (d *driver) Close() (err error) {
 	return
 }
 
-func (d *driver) Run(username string) (err error) {
+func (d *driver) Run(username string, sock string) (err error) {
 	// Log errors, if any
 	defer func() {
 		if err != nil {
@@ -115,7 +115,10 @@ func (d *driver) Run(username string) (err error) {
 		d.natrules = make(map[string][]portmapping)
 
 		// Connect to VPP
-		if d.vppcnx, err = govpp.Connect(VPPAPISock); err != nil {
+		if len(sock) == 0 {
+			sock = VPPAPISock
+		}
+		if d.vppcnx, err = govpp.Connect(sock); err != nil {
 			err = errors.Wrap(err, "govpp.Connect()")
 			return
 		}
