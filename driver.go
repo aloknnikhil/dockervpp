@@ -198,8 +198,8 @@ func (d *driver) CreateEndpoint(
 
 	// Create VETH pair for end-point
 	vETH := &netlink.Veth{
-		LinkAttrs: netlink.LinkAttrs{Name: "VPP" + request.NetworkID[:4]},
-		PeerName:  "VETH" + request.NetworkID[:4],
+		LinkAttrs: netlink.LinkAttrs{Name: "VPP" + request.EndpointID[:4]},
+		PeerName:  "VETH" + request.EndpointID[:4],
 	}
 
 	if err = d.nlink.LinkAdd(vETH); err != nil {
@@ -359,19 +359,28 @@ func (d *driver) CreateNetwork(
 		}
 	}
 
+	// If not internal, create gateway
+	var value interface{}
+	var internal bool
+	var ok bool
+	if value, ok = request.Options[netlabel.Internal]; ok {
+		internal = value.(bool)
+	}
+
 	// Create VPP bridge
-	if err = network.vppbridge.CreateGateway(ipv4, ipv4Subnet, ipv6, ipv6Subnet, nil); err != nil {
-		err = errors.Wrap(err, "vppbridge.CreateGateway()")
-		return
-	}
-	bridgeID++
+	if !internal {
+		if err = network.vppbridge.CreateGateway(ipv4, ipv4Subnet, ipv6, ipv6Subnet, nil); err != nil {
+			err = errors.Wrap(err, "vppbridge.CreateGateway()")
+			return
+		}
+		bridgeID++
 
-	// Set gateway as inside NAT
-	if err = natclient.Enable(network.gateway, in); err != nil {
-		err = errors.Wrap(err, "natclient.Enable()")
-		return
+		// Set gateway as inside NAT
+		if err = natclient.Enable(network.gateway, in); err != nil {
+			err = errors.Wrap(err, "natclient.Enable()")
+			return
+		}
 	}
-
 	// Cache network
 	d.networks[request.NetworkID] = network
 	return
@@ -609,14 +618,16 @@ func (d *driver) Join(
 		DisableGatewayService: true,
 	}
 
-	if network.gateway.ipV4 != nil {
-		response.Gateway = network.gateway.ipV4.String()
-		response.DisableGatewayService = false
-	}
+	if network.gateway != nil {
+		if network.gateway.ipV4 != nil {
+			response.Gateway = network.gateway.ipV4.String()
+			response.DisableGatewayService = false
+		}
 
-	if network.gateway.ipV6 != nil {
-		response.Gateway = network.gateway.ipV6.String()
-		response.DisableGatewayService = false
+		if network.gateway.ipV6 != nil {
+			response.Gateway = network.gateway.ipV6.String()
+			response.DisableGatewayService = false
+		}
 	}
 
 	switch link := intfc.Link.(type) {
