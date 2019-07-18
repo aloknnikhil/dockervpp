@@ -9,7 +9,7 @@ import (
 	"sync"
 	"syscall"
 
-	"github.com/dockervpp/bin_api/l2"
+	"github.com/nikhil93uf/dockervpp/bin_api/l2"
 
 	"git.fd.io/govpp.git/core"
 

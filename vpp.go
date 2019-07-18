@@ -4,10 +4,10 @@ import (
 	"log"
 	"net"
 
-	"github.com/dockervpp/bin_api/af_packet"
-	"github.com/dockervpp/bin_api/interfaces"
-	"github.com/dockervpp/bin_api/l2"
-	"github.com/dockervpp/bin_api/nat"
+	"github.com/nikhil93uf/dockervpp/bin_api/af_packet"
+	"github.com/nikhil93uf/dockervpp/bin_api/interfaces"
+	"github.com/nikhil93uf/dockervpp/bin_api/l2"
+	"github.com/nikhil93uf/dockervpp/bin_api/nat"
 
 	"github.com/vishvananda/netlink"
 
