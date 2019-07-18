@@ -45,11 +45,13 @@ const (
 type vppinterface struct {
 	api.Channel
 	interfacetype
-	swifidx interfaces.InterfaceIndex
-	address net.IP
-	subnet  *net.IPNet
-	mac     net.HardwareAddr
-	name    string
+	swifidx    interfaces.InterfaceIndex
+	ipV4       net.IP
+	ipV4Subnet *net.IPNet
+	ipV6       net.IP
+	ipV6Subnet *net.IPNet
+	mac        net.HardwareAddr
+	name       string
 }
 
 type vppbridge struct {
@@ -76,7 +78,6 @@ const (
 type vppnat struct {
 	api.Channel
 	external *vppinterface
-	mapping  []portmapping
 }
 
 func (n *vppnat) Enable(vppinterface *vppinterface, nattype nattype) (err error) {
@@ -160,7 +161,6 @@ func (n *vppnat) MapPorts(maps []portmapping) (err error) {
 			TwiceNat:          0,
 			SelfTwiceNat:      0,
 		}
-		log.Printf("NAT Rule - %+v\n", request)
 		ctx := n.Channel.SendRequest(request)
 		response := &nat.Nat44AddDelStaticMappingReply{}
 		if err = ctx.ReceiveReply(response); err != nil {
@@ -174,7 +174,60 @@ func (n *vppnat) MapPorts(maps []portmapping) (err error) {
 		// TODO: Rollback, if incomplete mapping
 	}
 
-	n.mapping = maps
+	return
+}
+
+func (n *vppnat) UnmapPorts(maps []portmapping) (err error) {
+	if n.external == nil {
+		// Find an interface with NAT enabled to "out"
+		request := &nat.Nat44InterfaceDump{}
+		ctx := n.SendMultiRequest(request)
+		for {
+			response := &nat.Nat44InterfaceDetails{}
+			var stop bool
+			if stop, err = ctx.ReceiveReply(response); stop {
+				// Stop received; No interface was configured as the outside facing NAT interface
+				err = errors.New("No external interface configured for NAT out")
+				return
+			} else if err != nil {
+				err = errors.Wrap(err, "nat.Nat44InterfaceDump()")
+				return
+			}
+
+			if response.IsInside == 0 {
+				n.external = &vppinterface{
+					Channel:       n.Channel,
+					interfacetype: unknown,
+					swifidx:       interfaces.InterfaceIndex(response.SwIfIndex),
+				}
+				break
+			}
+		}
+	}
+
+	for _, portmap := range maps {
+		request := &nat.Nat44AddDelStaticMapping{
+			IsAdd:             0,
+			LocalIPAddress:    portmap.internalip.To4(),
+			Protocol:          portmap.protocol,
+			LocalPort:         uint16(portmap.internalport),
+			ExternalPort:      uint16(portmap.externalport),
+			ExternalSwIfIndex: uint32(n.external.swifidx),
+			TwiceNat:          0,
+			SelfTwiceNat:      0,
+		}
+		ctx := n.Channel.SendRequest(request)
+		response := &nat.Nat44AddDelStaticMappingReply{}
+		if err = ctx.ReceiveReply(response); err != nil {
+			err = errors.Wrap(err, "ctx.ReceiveReply()")
+			return
+		}
+		if response.Retval != 0 {
+			err = errors.Errorf("DelNat44Mapping: %d error", response.Retval)
+			return
+		}
+		// TODO: Rollback, if incomplete mapping
+	}
 
 	return
 }
@@ -191,22 +244,29 @@ func (b *vppbridge) Close() (err error) {
 }
 
 // mac - Optional
-func (b *vppbridge) CreateGateway(address net.IP, subnet *net.IPNet, mac net.HardwareAddr) (err error) {
+func (b *vppbridge) CreateGateway(
+	ipv4 net.IP,
+	ipv4Subnet *net.IPNet,
+	ipv6 net.IP,
+	ipV6Subnet *net.IPNet,
+	mac net.HardwareAddr,
+) (err error) {
 	if b.Channel == nil {
 		err = errors.New("No VPP client session")
 		return
 	}
 
-	if address == nil {
-		err = errors.New("Invalid gateway IP address")
+	// TODO: Support IPv6
+	if ipv4 == nil && ipv6 == nil {
+		err = errors.New("No IPv4/6 address configured for the gateway")
 		return
 	}
 
 	if mac == nil {
-		mac = netutils.GenerateMACFromIP(address)
+		mac = netutils.GenerateMACFromIP(ipv4)
 	}
 
-	log.Printf("Creating gateway with IP: %s, Mac: %s\n", address, mac)
+	log.Printf("Creating gateway with IPv4: %s, Mac: %s\n", ipv4, mac)
 
 	// Step 1: Create Loopback Interface
 	if b.gateway, err = createLoopbackInterface(b.Channel, mac); err != nil {
@@ -227,8 +287,8 @@ func (b *vppbridge) CreateGateway(address net.IP, subnet *net.IPNet, mac net.Har
 	}
 
 	// Step 4: Set interface address
-	if err = b.gateway.SetAddress(address, subnet); err != nil {
-		err = errors.Wrapf(err, "gateway.SetAddress(%s)", address)
+	if err = b.gateway.SetAddress(ipv4, ipv4Subnet); err != nil {
+		err = errors.Wrapf(err, "gateway.SetAddress(%s)", ipv4)
 		return
 	}
 	return
@@ -428,13 +488,21 @@ func createHostInterface(api api.Channel, veth *netlink.Veth) (intfc *vppinterfa
 }
 
 func (v *vppinterface) SetAddress(address net.IP, subnet *net.IPNet) (err error) {
+	// HACKY
+	var isIPV6 uint8
+	addrbytes := address.To4()
+	if addrbytes == nil {
+		isIPV6 = 1
+		addrbytes = address.To16()
+	}
+
 	setaddress := &interfaces.SwInterfaceAddDelAddress{
 		SwIfIndex:     uint32(v.swifidx),
 		IsAdd:         1,
-		IsIPv6:        0,
+		IsIPv6:        isIPV6,
 		DelAll:        0,
-		AddressLength: 24,
-		Address:       address.To4(),
+		AddressLength: 24, // TODO: Read from parameter
+		Address:       addrbytes,
 	}
 
 	// Dispatch request
@@ -448,7 +516,13 @@ func (v *vppinterface) SetAddress(address net.IP, subnet *net.IPNet) (err error)
 		err = errors.Errorf("SetAddressReply: %d error", setaddressreply.Retval)
 		return
 	}
-	v.address = address
-	v.subnet = subnet
+
+	if isIPV6 == 1 {
+		v.ipV6 = address
+		v.ipV4Subnet = subnet
+	} else {
+		v.ipV4 = address
+		v.ipV4Subnet = subnet
+	}
 	return
 }

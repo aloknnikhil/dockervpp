@@ -55,13 +55,9 @@ type device struct {
 type network struct {
 	// Maps to a bridge configuration in VPP
 	*vppbridge
-	id          string
-	options     map[string]interface{}
-	ipV4Gateway net.IP
-	ipV4Subnet  *net.IPNet
-	ipV6Gateway net.IP
-	ipV6Subnet  *net.IPNet
-	endpoints   []*device
+	id        string
+	options   map[string]interface{}
+	endpoints []*device
 }
 
 type driver struct {
@@ -85,8 +81,8 @@ type driver struct {
 	networks map[string]*network
 	// Endpoint ID -> dockervpp.device
 	endpoints map[string]*device
-	// NAT rules
-	natrules []*portmapping
+	// Endpoint ID -> Port Mapping (NAT) rules
+	natrules map[string][]portmapping
 }
 
 func (d *driver) Close() (err error) {
@@ -115,6 +111,7 @@ func (d *driver) Run(username string) (err error) {
 
 		d.networks = make(map[string]*network)
 		d.endpoints = make(map[string]*device)
+		d.natrules = make(map[string][]portmapping)
 
 		// Connect to VPP
 		if d.vppcnx, err = govpp.Connect(VPPAPISock); err != nil {
@@ -305,13 +302,19 @@ func (d *driver) CreateNetwork(
 	network := &network{
 		id:      request.NetworkID,
 		options: request.Options,
+		vppbridge: &vppbridge{
+			Channel: d.vppapi,
+			ID:      bridgeID,
+		},
 	}
 
 	// Parse options
 	isIPV6 := false
+	var ipv6 net.IP
+	var ipv6Subnet *net.IPNet
 	for option, value := range request.Options {
 		switch option {
-		case netlabel.Prefix + netlabel.EnableIPv6:
+		case netlabel.EnableIPv6:
 			ok := false
 			if isIPV6, ok = value.(bool); !ok {
 				err = errors.Errorf("CreateNetwork: Invalid value for %s", netlabel.Prefix+netlabel.EnableIPv6)
@@ -324,11 +327,11 @@ func (d *driver) CreateNetwork(
 					err = errors.New("CreateNetwork: IPv6 requested but no subnet specified")
 					return
 				}
-				if network.ipV6Gateway, _, err = net.ParseCIDR(request.IPv6Data[0].Gateway); err != nil {
+				if ipv6, _, err = net.ParseCIDR(request.IPv6Data[0].Gateway); err != nil {
 					err = errors.Errorf("CreateNetwork: Could not parse IPv6 Gateway: %s", err.Error())
 					return
 				}
-				if _, network.ipV6Subnet, err = net.ParseCIDR(request.IPv6Data[0].Pool); err != nil {
+				if _, ipv6Subnet, err = net.ParseCIDR(request.IPv6Data[0].Pool); err != nil {
 					err = errors.Errorf("CreateNetwork: Could not parse IPv6 Pool: %s", err.Error())
 					return
 				}
@@ -337,28 +340,26 @@ func (d *driver) CreateNetwork(
 	}
 
 	// If IPv4, verify there's atleast 1 subnet specified
+	var ipv4 net.IP
+	var ipv4Subnet *net.IPNet
 	if len(request.IPv4Data) == 0 {
 		if !isIPV6 {
 			err = errors.New("No IPv4/6 subnets specified")
 			return
 		}
 	} else {
-		if network.ipV4Gateway, _, err = net.ParseCIDR(request.IPv4Data[0].Gateway); err != nil {
+		if ipv4, _, err = net.ParseCIDR(request.IPv4Data[0].Gateway); err != nil {
 			err = errors.Errorf("CreateNetwork: Could not parse IPv4 Gateway: %s", err.Error())
 			return
 		}
-		if _, network.ipV4Subnet, err = net.ParseCIDR(request.IPv4Data[0].Pool); err != nil {
+		if _, ipv4Subnet, err = net.ParseCIDR(request.IPv4Data[0].Pool); err != nil {
 			err = errors.Errorf("CreateNetwork: Could not parse IPv4 Pool: %s", err.Error())
 			return
 		}
 	}
 
 	// Create VPP bridge
-	network.vppbridge = &vppbridge{
-		Channel: d.vppapi,
-		ID:      bridgeID,
-	}
-	if err = network.vppbridge.CreateGateway(network.ipV4Gateway, network.ipV4Subnet, nil); err != nil {
+	if err = network.vppbridge.CreateGateway(ipv4, ipv4Subnet, ipv6, ipv6Subnet, nil); err != nil {
 		err = errors.Wrap(err, "vppbridge.CreateGateway()")
 		return
 	}
@@ -589,8 +590,17 @@ func (d *driver) Join(
 		InterfaceName: pluginapi.InterfaceName{
 			DstPrefix: "narf",
 		},
-		DisableGatewayService: false,
-		Gateway:               network.gateway.address.String(),
+		DisableGatewayService: true,
+	}
+
+	if network.gateway.ipV4 != nil {
+		response.Gateway = network.gateway.ipV4.String()
+		response.DisableGatewayService = false
+	}
+
+	if network.gateway.ipV6 != nil {
+		response.Gateway = network.gateway.ipV6.String()
+		response.DisableGatewayService = false
 	}
 
 	switch link := intfc.Link.(type) {
@@ -615,7 +625,7 @@ func (d *driver) Leave(
 	}()
 
 	log.Println("Leave")
-	//err = &driverapi.ErrNotImplemented{}
+	// DeleteEndpoint also deletes the VPP end of the interface. Nothing to do here
 	return
 }
 
@@ -641,8 +651,9 @@ func (d *driver) ProgramExternalConnectivity(
 
 	// Parse connectivity options
 	for key, value := range request.Options {
+		log.Printf("key - %s; check - %s", key, netlabel.Prefix+netlabel.PortMap)
 		switch key {
-		case "com.docker.network.portmap":
+		case netlabel.PortMap:
 			var mapping []interface{}
 			var ok bool
 			if mapping, ok = value.([]interface{}); !ok {
@@ -705,6 +716,9 @@ func (d *driver) ProgramExternalConnectivity(
 				err = errors.Wrapf(err, "nat.MapPorts(%+v)", rules)
 				return
 			}
+
+			// Cache
+			d.natrules[request.EndpointID] = append(d.natrules[request.EndpointID], rules...)
 		default:
 			log.Printf("[WARN] Unknown configuration key - %s; Ignoring", key)
 		}
@@ -724,6 +738,19 @@ func (d *driver) RevokeExternalConnectivity(
 	}()
 
 	log.Println("RevokeExternalConnectivity")
-	// DO NOTHING
+
+	// Remove all port maps
+	var rules []portmapping
+	var ok bool
+	if rules, ok = d.natrules[request.EndpointID]; !ok {
+		// No maps; nothing to do
+		return
+	}
+
+	if err = natclient.UnmapPorts(rules); err != nil {
+		err = errors.Wrap(err, "natclient.UnmapPorts()")
+		return
+	}
+
 	return
 }
