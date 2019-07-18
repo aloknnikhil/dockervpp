@@ -197,8 +197,8 @@ func (d *driver) CreateEndpoint(
 
 	// Create VETH pair for end-point
 	vETH := &netlink.Veth{
-		LinkAttrs: netlink.LinkAttrs{Name: "VPP" + request.NetworkID[:4]},
-		PeerName:  "VETH" + request.NetworkID[:4],
+		LinkAttrs: netlink.LinkAttrs{Name: "VPP" + request.EndpointID[:4]},
+		PeerName:  "VETH" + request.EndpointID[:4],
 	}
 
 	if err = d.nlink.LinkAdd(vETH); err != nil {
