@@ -60,6 +60,7 @@ type vppbridge struct {
 	ID       uint32
 	gateway  *vppinterface
 	segments []*vppinterface
+	mtu      uint64
 }
 
 type portmapping struct {
@@ -282,7 +283,7 @@ func (b *vppbridge) CreateGateway(
 	log.Printf("Creating gateway with IPv4: %s, Mac: %s\n", ipv4, mac)
 
 	// Step 1: Create Loopback Interface
-	if b.gateway, err = createLoopbackInterface(b.Channel, mac); err != nil {
+	if b.gateway, err = createLoopbackInterface(b.Channel, mac, uint16(b.mtu)); err != nil {
 		err = errors.Wrap(err, "createLoopbackInterface()")
 		return
 	}
@@ -445,7 +446,7 @@ func (v *vppinterface) Delete() (err error) {
 	return
 }
 
-func createLoopbackInterface(api api.Channel, mac net.HardwareAddr) (intfc *vppinterface, err error) {
+func createLoopbackInterface(api api.Channel, mac net.HardwareAddr, mtu uint16) (intfc *vppinterface, err error) {
 	createloop := &interfaces.CreateLoopback{
 		MacAddress: mac,
 	}
@@ -461,6 +462,23 @@ func createLoopbackInterface(api api.Channel, mac net.HardwareAddr) (intfc *vppi
 		err = errors.Errorf("CreateLoopbackReply: %d error", createloopreply.Retval)
 		return
 	}
+
+	// Set MTU
+	mturequest := &interfaces.HwInterfaceSetMtu{
+		SwIfIndex: createloopreply.SwIfIndex,
+		Mtu:       mtu,
+	}
+	ctx = api.SendRequest(mturequest)
+	mturesponse := &interfaces.HwInterfaceSetMtuReply{}
+	if err = ctx.ReceiveReply(mturesponse); err != nil {
+		err = errors.Wrap(err, "ctx.ReceiveReply()")
+		return
+	}
+	if mturesponse.Retval != 0 {
+		err = errors.Errorf("HwInterfaceSetMtu: %d error", mturesponse.Retval)
+		return
+	}
+
 	intfc = &vppinterface{
 		Channel:       api,
 		swifidx:       interfaces.InterfaceIndex(createloopreply.SwIfIndex),
@@ -490,6 +508,23 @@ func createHostInterface(api api.Channel, veth *netlink.Veth) (intfc *vppinterfa
 		err = errors.Errorf("AF_PACKETCreate: %d error", response.Retval)
 		return
 	}
+
+	// Set MTU
+	mturequest := &interfaces.HwInterfaceSetMtu{
+		SwIfIndex: response.SwIfIndex,
+		Mtu:       uint16(veth.MTU),
+	}
+	ctx = api.SendRequest(mturequest)
+	mturesponse := &interfaces.HwInterfaceSetMtuReply{}
+	if err = ctx.ReceiveReply(mturesponse); err != nil {
+		err = errors.Wrap(err, "ctx.ReceiveReply()")
+		return
+	}
+	if mturesponse.Retval != 0 {
+		err = errors.Errorf("HwInterfaceSetMtu: %d error", mturesponse.Retval)
+		return
+	}
+
 	intfc = &vppinterface{
 		Channel:       api,
 		swifidx:       interfaces.InterfaceIndex(response.SwIfIndex),

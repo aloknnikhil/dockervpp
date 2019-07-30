@@ -202,8 +202,11 @@ func (d *driver) CreateEndpoint(
 
 	// Create VETH pair for end-point
 	vETH := &netlink.Veth{
-		LinkAttrs: netlink.LinkAttrs{Name: "VPP" + request.EndpointID[:4]},
-		PeerName:  "VETH" + request.EndpointID[:4],
+		LinkAttrs: netlink.LinkAttrs{
+			Name: "VPP" + request.EndpointID[:4],
+			MTU:  int(network.mtu),
+		},
+		PeerName: "VETH" + request.EndpointID[:4],
 	}
 
 	if err = d.nlink.LinkAdd(vETH); err != nil {
@@ -340,6 +343,19 @@ func (d *driver) CreateNetwork(
 					err = errors.Errorf("CreateNetwork: Could not parse IPv6 Pool: %s", err.Error())
 					return
 				}
+			}
+
+		case netlabel.DriverMTU:
+			ok := false
+			var mtu string
+			if mtu, ok = value.(string); !ok {
+				err = errors.Errorf("CreateNetwork: Invalid value for %s. Actual Type: %s", netlabel.Prefix+netlabel.EnableIPv6, reflect.TypeOf(value))
+				return
+			}
+
+			if network.mtu, err = strconv.ParseUint(mtu, 10, 64); err != nil {
+				err = errors.Wrap(err, "strconv.ParseUint()")
+				return
 			}
 		}
 	}
@@ -680,9 +696,10 @@ func (d *driver) ProgramExternalConnectivity(
 		return
 	}
 
+	log.Printf("Bind options: %+v\n", request.Options)
+
 	// Parse connectivity options
 	for key, value := range request.Options {
-		log.Printf("key - %s; check - %s", key, netlabel.Prefix+netlabel.PortMap)
 		switch key {
 		case netlabel.PortMap:
 			var mapping []interface{}
