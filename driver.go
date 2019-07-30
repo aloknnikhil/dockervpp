@@ -306,6 +306,8 @@ func (d *driver) CreateNetwork(
 		return
 	}
 
+	log.Printf("Option map: %+v\n", request.Options)
+
 	// Container for caching
 	network := &network{
 		id:      request.NetworkID,
@@ -325,7 +327,7 @@ func (d *driver) CreateNetwork(
 		case netlabel.EnableIPv6:
 			ok := false
 			if isIPV6, ok = value.(bool); !ok {
-				err = errors.Errorf("CreateNetwork: Invalid value for %s", netlabel.Prefix+netlabel.EnableIPv6)
+				err = errors.Errorf("CreateNetwork: Invalid value for %s", netlabel.EnableIPv6)
 				return
 			}
 
@@ -345,17 +347,30 @@ func (d *driver) CreateNetwork(
 				}
 			}
 
-		case netlabel.DriverMTU:
-			ok := false
-			var mtu string
-			if mtu, ok = value.(string); !ok {
-				err = errors.Errorf("CreateNetwork: Invalid value for %s. Actual Type: %s", netlabel.Prefix+netlabel.EnableIPv6, reflect.TypeOf(value))
+		case netlabel.GenericData:
+			var genericoptions map[string]interface{}
+			var ok bool
+			if genericoptions, ok = value.(map[string]interface{}); !ok {
+				err = errors.Errorf("CreateNetwork: Invalid value for %s. Actual type: %s", netlabel.GenericData, reflect.TypeOf(value))
 				return
 			}
+			for generic, genericval := range genericoptions {
+				switch generic {
+				case netlabel.DriverMTU:
+					log.Println("Found Network MTU specification")
 
-			if network.mtu, err = strconv.ParseUint(mtu, 10, 64); err != nil {
-				err = errors.Wrap(err, "strconv.ParseUint()")
-				return
+					var mtu string
+					if mtu, ok = genericval.(string); !ok {
+						err = errors.Errorf("CreateNetwork: Invalid value for %s. Actual type: %s", netlabel.DriverMTU, reflect.TypeOf(value))
+						return
+					}
+
+					if network.mtu, err = strconv.ParseUint(mtu, 10, 64); err != nil {
+						err = errors.Wrap(err, "strconv.ParseUint()")
+						return
+					}
+					log.Printf("Network MTU set to: %d\n", network.mtu)
+				}
 			}
 		}
 	}

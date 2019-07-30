@@ -463,20 +463,22 @@ func createLoopbackInterface(api api.Channel, mac net.HardwareAddr, mtu uint16) 
 		return
 	}
 
-	// Set MTU
-	mturequest := &interfaces.HwInterfaceSetMtu{
-		SwIfIndex: createloopreply.SwIfIndex,
-		Mtu:       mtu,
-	}
-	ctx = api.SendRequest(mturequest)
-	mturesponse := &interfaces.HwInterfaceSetMtuReply{}
-	if err = ctx.ReceiveReply(mturesponse); err != nil {
-		err = errors.Wrap(err, "ctx.ReceiveReply()")
-		return
-	}
-	if mturesponse.Retval != 0 {
-		err = errors.Errorf("HwInterfaceSetMtu: %d error", mturesponse.Retval)
-		return
+	// Set MTU, if > 0
+	if mtu > 0 {
+		mturequest := &interfaces.HwInterfaceSetMtu{
+			SwIfIndex: createloopreply.SwIfIndex,
+			Mtu:       mtu,
+		}
+		ctx = api.SendRequest(mturequest)
+		mturesponse := &interfaces.HwInterfaceSetMtuReply{}
+		if err = ctx.ReceiveReply(mturesponse); err != nil {
+			err = errors.Wrap(err, "ctx.ReceiveReply()")
+			return
+		}
+		if mturesponse.Retval != 0 {
+			err = errors.Errorf("HwInterfaceSetMtu: %d error", mturesponse.Retval)
+			return
+		}
 	}
 
 	intfc = &vppinterface{
@@ -509,20 +511,22 @@ func createHostInterface(api api.Channel, veth *netlink.Veth) (intfc *vppinterfa
 		return
 	}
 
-	// Set MTU
-	mturequest := &interfaces.HwInterfaceSetMtu{
-		SwIfIndex: response.SwIfIndex,
-		Mtu:       uint16(veth.MTU),
-	}
-	ctx = api.SendRequest(mturequest)
-	mturesponse := &interfaces.HwInterfaceSetMtuReply{}
-	if err = ctx.ReceiveReply(mturesponse); err != nil {
-		err = errors.Wrap(err, "ctx.ReceiveReply()")
-		return
-	}
-	if mturesponse.Retval != 0 {
-		err = errors.Errorf("HwInterfaceSetMtu: %d error", mturesponse.Retval)
-		return
+	// Set MTU, if > 0
+	if veth.MTU > 0 {
+		mturequest := &interfaces.HwInterfaceSetMtu{
+			SwIfIndex: response.SwIfIndex,
+			Mtu:       uint16(veth.MTU),
+		}
+		ctx = api.SendRequest(mturequest)
+		mturesponse := &interfaces.HwInterfaceSetMtuReply{}
+		if err = ctx.ReceiveReply(mturesponse); err != nil {
+			err = errors.Wrap(err, "ctx.ReceiveReply()")
+			return
+		}
+		if mturesponse.Retval != 0 {
+			err = errors.Errorf("HwInterfaceSetMtu: %d error", mturesponse.Retval)
+			return
+		}
 	}
 
 	intfc = &vppinterface{
